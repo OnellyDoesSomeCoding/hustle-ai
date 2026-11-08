@@ -1,0 +1,10 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+python-multipart>=0.0.12
+httpx>=0.27
+yt-dlp[default]>=2025.1.1
+faster-whisper>=1.1.0
+# PyAV 19 removed the `metadata_errors` kwarg that faster-whisper 1.2.x passes to av.open()
+av<19
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

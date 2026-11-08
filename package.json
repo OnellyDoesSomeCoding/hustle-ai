@@ -1,0 +1,17 @@
+{
+  "name": "hustle-ai",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local AI clipper: long videos in, vertical shorts out. No login.",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "concurrently -k -n api,web -c yellow,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "node scripts/api.mjs --reload",
+    "dev:web": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "start": "npm run build && node scripts/api.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
