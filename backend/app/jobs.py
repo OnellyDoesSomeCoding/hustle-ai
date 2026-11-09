@@ -17,14 +17,14 @@ from pathlib import Path
 from typing import Callable
 
 from . import learning
-from .pipeline import captions, curate, edit, ingest, media, posts, reframe, transcribe
+from .pipeline import captions, countdown, curate, edit, ingest, media, posts, reframe, scoring, signals, transcribe
 from .store import store
 
 # Overall progress range for each stage.
 STAGES = {
     "download": (0.00, 0.15),
-    "transcribe": (0.15, 0.60),
-    "curate": (0.60, 0.68),
+    "transcribe": (0.15, 0.57),
+    "curate": (0.57, 0.68),
     "posts": (0.68, 0.72),
     "render": (0.72, 1.00),
 }
@@ -62,6 +62,11 @@ def _reporter(project_id: str, stage: str) -> Callable[[float, str], None]:
                      message=message)
 
     return report
+
+
+def _part(report: Callable[[float, str], None], lo: float, hi: float) -> Callable[[float, str], None]:
+    """A reporter for one part (lo..hi) of a stage."""
+    return lambda pct, message: report(lo + (hi - lo) * pct, message)
 
 
 def _run(project_id: str) -> None:
@@ -109,37 +114,56 @@ def _run(project_id: str) -> None:
     if not segments:
         raise RuntimeError("No speech was detected in the video.")
 
-    # 3. Pick clips ----------------------------------------------------------------
+    # 3. Pick and rank clips -----------------------------------------------------------
     report = _reporter(project_id, "curate")
+    sig_path = folder / "signals.json"
+    if sig_path.exists():
+        sig_data = json.loads(sig_path.read_text(encoding="utf-8"))
+    else:
+        sig_data = signals.analyze(source, start, end, _part(report, 0.0, 0.3))
+        sig_path.write_text(json.dumps(sig_data), encoding="utf-8")
+    learned_weights = learning.factor_weights(exclude=project_id)
+    pace = opts.get("pace", "natural")
+    ranker = scoring.Ranker(segments, signals.Signals(sig_data), pace, info["fps"], learned_weights["weights"])
+
     curation_path = folder / "curation.json"
     if curation_path.exists():
         cur = json.loads(curation_path.read_text(encoding="utf-8"))
     else:
-        report(0.0, "Finding the best moments…")
+        report(0.3, "Finding the best moments…")
         learned, learned_from = learning.examples(exclude=project_id)
         hint = curate.ANIMATION_GUIDANCE if opts.get("content") == "animation" else None
         guidance = "\n\n".join(g for g in (hint, learned) if g) or None
         picked, mode, note = curate.curate(segments, opts.get("length", "under60"), int(opts.get("max_clips") or 0),
-                                           report, guidance)
+                                           ranker, _part(report, 0.3, 0.8), guidance)
         cur = {"clips": picked, "mode": mode, "note": note, "learned_from": learned_from if mode == "llm" else 0}
-        curation_path.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
     if not cur["clips"]:
         raise RuntimeError(cur.get("note") or "No clips could be found in this video.")
+    if not cur.get("ranked"):
+        scoring.finalize(cur["clips"], ranker, source, info, _part(report, 0.8, 1.0))
+        # Clip ids follow list order. New picks are sorted best-first; projects made before
+        # ranking existed keep their order, so their clip ids (and logged results) still match.
+        if not curation_path.exists():
+            cur["clips"].sort(key=lambda c: c["score"], reverse=True)
+        cur.update(ranked=True, weights=learned_weights["weights"], weights_from=learned_weights["learned_from"])
+        curation_path.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
 
     stats = learning.load(project_id)
+    by_score = sorted(range(len(cur["clips"])), key=lambda i: cur["clips"][i]["score"], reverse=True)
     clips = []
-    for i, c in enumerate(sorted(cur["clips"], key=lambda c: c["score"], reverse=True)):
+    for i, c in enumerate(cur["clips"]):
+        clip_id = f"c{i + 1:02d}"
         clips.append({
-            "id": f"c{i + 1:02d}", "index": i,
+            "id": clip_id, "index": i, "rank": by_score.index(i) + 1,
             "start": round(c["start"], 3), "end": round(c["end"], 3),
             "duration": round(c["end"] - c["start"], 2),
             "title": c["title"], "hook": c.get("hook", ""), "reason": c.get("reason", ""),
-            "score": c["score"], "status": "pending",
+            "score": c["score"], "scores": c.get("scores"), "cues": c.get("cues", []), "status": "pending",
             "video": None, "thumb": None, "srt": None, "post": None,
-            "stats": learning.public(stats.get(f"c{i + 1:02d}")),
+            "stats": learning.public(stats.get(clip_id)),
         })
     store.update(project_id, clips=clips, curation_mode=cur["mode"], note=cur.get("note"),
-                 learned_from=cur.get("learned_from", 0))
+                 learned_from=cur.get("learned_from", 0), weights_from=cur.get("weights_from", 0))
 
     # 4. Post copy (titles, descriptions, hashtags) ----------------------------------------
     report = _reporter(project_id, "posts")
@@ -162,7 +186,6 @@ def _run(project_id: str) -> None:
     # 5. Render ------------------------------------------------------------------------
     report = _reporter(project_id, "render")
     template = opts.get("caption_template", "karaoke")
-    pace = opts.get("pace", "natural")
     track_faces = opts.get("reframe", "face") == "face" and reframe.needs_tracking(info)
     animation = opts.get("content") == "animation"
     render_note = None
@@ -214,11 +237,74 @@ def _run(project_id: str) -> None:
                  message=f"{len(clips)} clips ready")
 
 
+COUNTDOWN = "countdown:"  # queue entries for countdown videos are prefixed with this
+
+
+def enqueue_countdown(project_id: str) -> None:
+    enqueue(COUNTDOWN + project_id)
+
+
+def _set_countdown(project_id: str, **fields) -> None:
+    project = store.get(project_id)
+    if project is None:
+        raise Cancelled()
+    store.update(project_id, countdown={**(project.get("countdown") or {}), **fields})
+
+
+def _run_countdown(project_id: str) -> None:
+    project = store.get(project_id)
+    job = (project or {}).get("countdown")
+    if not job or job.get("status") not in ("queued", "processing"):
+        return
+    _set_countdown(project_id, status="processing", progress=0.0, message="Starting…", error=None)
+    folder = store.dir(project_id)
+    clips = {c["id"]: c for c in project["clips"]}
+    by_rank = {}
+    for n, entry in enumerate(job["items"]):  # best first: entry 0 is #1
+        clip = clips.get(entry["id"])
+        if clip is None or not clip.get("video") or not (folder / clip["video"]).exists():
+            raise RuntimeError("A clip in the top list is missing. Re-render the project, then try again.")
+        by_rank[n + 1] = {"video": folder / clip["video"], "duration": clip["duration"], "rank": n + 1,
+                          "label": entry["title"] or clip["title"]}
+    reveal = job.get("reveal")
+    if sorted(reveal or []) != sorted(by_rank):
+        reveal = countdown.shuffled_order(len(by_rank))
+        _set_countdown(project_id, reveal=reveal)
+    items = [by_rank[r] for r in reveal]  # playback order = reveal order
+    last = [0.0]
+
+    def report(pct: float, message: str) -> None:
+        if store.get(project_id) is None:
+            raise Cancelled()
+        if pct - last[0] >= 0.02:
+            last[0] = pct
+            _set_countdown(project_id, progress=round(pct, 3), message=message)
+
+    _, duration = countdown.render(items, job["title"], (project.get("media") or {}).get("fps", 30.0),
+                                   folder / "countdown", report, job.get("clip_max"))
+    _set_countdown(project_id, status="done", progress=1.0, message="Ready", video="countdown/countdown.mp4",
+                   duration=round(duration, 2), rendered_at=time.time())
+
+
 def _worker() -> None:
     while True:
-        project_id = _queue.get()
+        key = _queue.get()
         with _lock:
-            _queued.discard(project_id)
+            _queued.discard(key)
+        if key.startswith(COUNTDOWN):
+            project_id = key[len(COUNTDOWN):]
+            try:
+                _run_countdown(project_id)
+            except Cancelled:
+                pass
+            except Exception as exc:
+                traceback.print_exc()
+                if store.get(project_id) is not None:
+                    _set_countdown(project_id, status="error", error=str(exc), message="Failed")
+            finally:
+                _queue.task_done()
+            continue
+        project_id = key
         try:
             _run(project_id)
         except Cancelled:
@@ -237,6 +323,8 @@ def start_worker() -> None:
     for project in sorted(store.list(), key=lambda p: p["created_at"]):
         if project["status"] in ("queued", "processing"):
             enqueue(project["id"])
+        if (project.get("countdown") or {}).get("status") in ("queued", "processing"):
+            enqueue_countdown(project["id"])
 
 
 def reset_for_retry(project_id: str, full: bool) -> None:
@@ -244,9 +332,11 @@ def reset_for_retry(project_id: str, full: bool) -> None:
     folder: Path = store.dir(project_id)
     shutil.rmtree(folder / "clips", ignore_errors=True)
     if full:
-        for name in ("transcript.json", "curation.json", "posts.json"):
+        for name in ("transcript.json", "signals.json", "curation.json", "posts.json"):
             (folder / name).unlink(missing_ok=True)
         learning.clear(project_id)  # new picks: old results no longer belong to these clip ids
+        shutil.rmtree(folder / "countdown", ignore_errors=True)
+        store.update(project_id, countdown=None)
     store.update(project_id, status="queued", stage="queued", progress=0.0, error=None,
                  message="Waiting in queue", clips=[])
 

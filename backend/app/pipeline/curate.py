@@ -2,20 +2,23 @@
 
 Primary: a local LLM through Ollama reads numbered transcript lines and returns
 clip ranges by line number (small models are far more reliable with line
-numbers than with raw timestamps). Fallback: a text heuristic, so the app still
-works when Ollama isn't running.
+numbers than with raw timestamps), and scores each one's hook, payoff and how
+well it stands alone. Fallback: a heuristic over the transcript and audio, so the
+app still works when Ollama isn't running. Either way, candidates are ranked by
+scoring.Ranker (which adds the measured energy and pacing).
 """
 
 from __future__ import annotations
 
 import json
 import math
-import re
 from typing import Callable
 
 import httpx
 
 from ..config import OLLAMA_MODEL, OLLAMA_URL
+from .scoring import Ranker
+from .signals import Signals
 
 LENGTHS: dict[str, tuple[float, float]] = {
     "under30": (12, 30),
@@ -28,6 +31,8 @@ WINDOW_OVERLAP = 60
 
 SYSTEM_PROMPT = """You are a senior short-form video editor who cuts viral TikTok, Reels and YouTube Shorts from long videos.
 You get a transcript as numbered lines: [line] mm:ss text.
+Some lines carry sound cues in parentheses, like (laughter), (applause) or (shouting): something
+in the audio really got that reaction, which often marks a punchline or a high point.
 Pick the moments most likely to go viral as standalone clips. A great clip:
 - opens with a strong hook in the first sentence (a bold claim, question, surprising fact, conflict or emotion),
 - is one complete, self-contained thought that makes sense without the rest of the video,
@@ -38,8 +43,11 @@ For each clip return:
 - start_line, end_line: inclusive line numbers from the transcript,
 - title: catchy post title, max 60 characters,
 - hook: punchy on-screen text for the first seconds, max 8 words,
-- score: 0-100 virality estimate (be critical; most moments are 40-75),
+- hook_score: 0-100, how hard the first 3 seconds stop the scroll,
+- payoff_score: 0-100, how satisfying the ending is (punchline, insight, resolution),
+- standalone_score: 0-100, how well it makes sense to someone who hasn't seen the video,
 - reason: one short sentence on why it works.
+Be critical with the scores: most moments land between 40 and 75.
 Write title and hook in the same language as the transcript. Respond with JSON only."""
 
 ANIMATION_GUIDANCE = """This video is an animated show (cartoon or anime, English audio).
@@ -59,10 +67,13 @@ SCHEMA = {
                     "end_line": {"type": "integer"},
                     "title": {"type": "string"},
                     "hook": {"type": "string"},
-                    "score": {"type": "integer"},
+                    "hook_score": {"type": "integer"},
+                    "payoff_score": {"type": "integer"},
+                    "standalone_score": {"type": "integer"},
                     "reason": {"type": "string"},
                 },
-                "required": ["start_line", "end_line", "title", "hook", "score", "reason"],
+                "required": ["start_line", "end_line", "title", "hook", "hook_score", "payoff_score",
+                             "standalone_score", "reason"],
             },
         }
     },
@@ -202,8 +213,28 @@ def unload_llm() -> None:
         pass
 
 
-def curate_llm(units: list[dict], count: int, lo: float, hi: float, on_progress: Callable[[float, str], None],
-               guidance: str | None = None) -> list[dict]:
+def _cue(sig: Signals, unit: dict) -> str:
+    """Sound cue shown on a transcript line, e.g. "(laughter) "."""
+    if not sig.has_events:
+        return ""
+    a, b = unit["start"], unit["end"] + 1.0
+    for name, label, floor in (("laugh", "laughter", 0.22), ("applause", "applause", 0.30), ("shout", "shouting", 0.35)):
+        if sig.event(name, a, b, top=2) >= floor:
+            return f"({label}) "
+    if sig.share("music", unit["start"], unit["end"], 0.5) > 0.6 and sig.share("speech", unit["start"], unit["end"], 0.5) < 0.4:
+        return "(music) "
+    return ""
+
+
+def _ai_scores(c: dict) -> dict | None:
+    try:
+        return {f: int(max(0, min(100, c[f"{f}_score"]))) for f in ("hook", "payoff", "standalone")}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def curate_llm(units: list[dict], count: int, lo: float, hi: float, ranker: Ranker,
+               on_progress: Callable[[float, str], None], guidance: str | None = None) -> list[dict]:
     """`guidance` = extra instructions: content hints and examples of the creator's past
     clips with their results (see learning.py)."""
     windows = _windows(units)
@@ -214,7 +245,8 @@ def curate_llm(units: list[dict], count: int, lo: float, hi: float, on_progress:
         on_progress(n / len(windows), f"AI is reading the transcript… part {n + 1}/{len(windows)}")
         span = units[b]["end"] - units[a]["start"]
         wanted = max(3, math.ceil(count * span / total_span) + 2)
-        lines = "\n".join(f"[{i}] {_fmt(units[i]['start'])} {units[i]['text']}" for i in range(a, b + 1))
+        lines = "\n".join(f"[{i}] {_fmt(units[i]['start'])} {_cue(ranker.sig, units[i])}{units[i]['text']}"
+                          for i in range(a, b + 1))
         try:
             raw = _ask_llm(lines, wanted, lo, hi, guidance)
         except Exception as exc:
@@ -231,12 +263,14 @@ def curate_llm(units: list[dict], count: int, lo: float, hi: float, on_progress:
             if not fitted:
                 continue
             s, e = fitted
+            start, end = units[s]["start"], units[e]["end"]
+            ai = _ai_scores(c)
+            score, scores = ranker.score(start, end, ai)
             cands.append({
-                "start": units[s]["start"],
-                "end": units[e]["end"],
+                "start": start, "end": end,
                 "title": str(c.get("title", "")).strip()[:80] or units[s]["text"][:60],
                 "hook": str(c.get("hook", "")).strip()[:60],
-                "score": int(max(0, min(100, c.get("score", 50)))),
+                "score": score, "scores": scores, "ai": ai,
                 "reason": str(c.get("reason", "")).strip()[:200],
             })
     if errors == len(windows):
@@ -246,43 +280,32 @@ def curate_llm(units: list[dict], count: int, lo: float, hi: float, on_progress:
 
 # ---- heuristic path ----------------------------------------------------------
 
-HOOK_WORDS = re.compile(
-    r"\b(how|why|what|secret|never|always|nobody|everyone|mistake|truth|actually|crazy|insane|"
-    r"best|worst|biggest|stop|wrong|money|million|you|imagine|story|problem)\b|\d",
-    re.IGNORECASE,
-)
-
-
-def curate_heuristic(units: list[dict], count: int, lo: float, hi: float) -> list[dict]:
+def curate_heuristic(units: list[dict], count: int, lo: float, hi: float, ranker: Ranker) -> list[dict]:
+    """Tries a clip starting at every sentence and keeps the best-ranked ones."""
     target = (lo + hi) / 2
     cands = []
     for s in range(len(units)):
         e = s
         while e + 1 < len(units) and units[e + 1]["end"] - units[s]["start"] <= target:
             e += 1
+        # Prefer ending on a finished sentence: step back to one if it keeps the clip long enough.
+        k = e
+        while k > s and not units[k]["text"].rstrip().endswith((".", "?", "!", "…")):
+            k -= 1
+        if k > s and units[k]["end"] - units[s]["start"] >= lo:
+            e = k
         fitted = _fit_length(units, s, e, lo, hi)
         if not fitted:
             continue
         s2, e2 = fitted
-        chunk = units[s2:e2 + 1]
-        dur = chunk[-1]["end"] - chunk[0]["start"]
-        text = " ".join(u["text"] for u in chunk)
-        density = sum(u["words"] for u in chunk) / max(dur, 1)          # words per second
-        punch = text.count("?") + text.count("!")
-        hook = len(HOOK_WORDS.findall(chunk[0]["text"]))
-        clarity = sum(u["p"] for u in chunk) / len(chunk)
-        raw = density * 0.8 + min(punch, 4) * 0.5 + min(hook, 4) * 0.6 + clarity * 1.5
-        cands.append({"start": chunk[0]["start"], "end": chunk[-1]["end"], "raw": raw,
-                      "title": chunk[0]["text"][:60], "hook": "", "reason": "Picked by the offline heuristic."})
-    if not cands:
-        return []
-    lo_raw, hi_raw = min(c["raw"] for c in cands), max(c["raw"] for c in cands)
-    for c in cands:
-        c["score"] = int(40 + 50 * (c.pop("raw") - lo_raw) / max(hi_raw - lo_raw, 1e-6))
+        start, end = units[s2]["start"], units[e2]["end"]
+        score, scores = ranker.score(start, end)
+        cands.append({"start": start, "end": end, "score": score, "scores": scores,
+                      "title": units[s2]["text"][:60], "hook": "", "reason": "Picked by the offline heuristic."})
     return _dedupe(cands, count)
 
 
-def curate(segments: list[dict], length_key: str, max_clips: int,
+def curate(segments: list[dict], length_key: str, max_clips: int, ranker: Ranker,
            on_progress: Callable[[float, str], None], guidance: str | None = None) -> tuple[list[dict], str, str | None]:
     """Returns (clips, mode, note). mode is "llm" or "heuristic"."""
     units = build_units(segments)
@@ -298,7 +321,7 @@ def curate(segments: list[dict], length_key: str, max_clips: int,
     note = None
     if status["running"] and status["model_ready"]:
         try:
-            return curate_llm(units, count, lo, hi, on_progress, guidance), "llm", None
+            return curate_llm(units, count, lo, hi, ranker, on_progress, guidance), "llm", None
         except Exception as exc:
             note = f"AI curation failed ({exc}); used the offline heuristic instead."
     elif status["running"]:
@@ -306,4 +329,4 @@ def curate(segments: list[dict], length_key: str, max_clips: int,
     else:
         note = "Ollama isn't running; used the offline heuristic. Start Ollama for AI-picked clips."
     on_progress(0.5, "Scoring moments (offline heuristic)…")
-    return curate_heuristic(units, count, lo, hi), "heuristic", note
+    return curate_heuristic(units, count, lo, hi, ranker), "heuristic", note

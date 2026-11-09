@@ -24,13 +24,11 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import httpx
-
-from ..config import DATA_DIR, ffmpeg_path
+from ..config import ffmpeg_path
+from . import models
 from .edit import Timeline
 from .media import _NO_WINDOW, OUT_H, OUT_W, MediaError
 
-MODELS_DIR = DATA_DIR / "models"
 # Each model has a mirror, so one site being down doesn't turn face tracking off.
 YUNET = ("face_detection_yunet_2023mar.onnx", 100_000, [
     "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx",
@@ -77,29 +75,10 @@ def needs_tracking(media: dict) -> bool:
 
 
 def _ensure_model(model: tuple[str, int, list[str]] = YUNET) -> Path:
-    """Downloads a model on first use (trying each mirror) and returns its path."""
-    name, min_size, urls = model
-    path = MODELS_DIR / name
-    if path.exists() and path.stat().st_size > min_size:
-        return path
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".part")
-    errors = []
-    for url in urls:
-        try:
-            with httpx.stream("GET", url, follow_redirects=True, timeout=60) as r:
-                r.raise_for_status()
-                with open(tmp, "wb") as f:
-                    for chunk in r.iter_bytes():
-                        f.write(chunk)
-            if tmp.stat().st_size > min_size:
-                tmp.replace(path)
-                return path
-            errors.append(f"{url}: incomplete download")
-        except Exception as exc:
-            errors.append(f"{url}: {exc}")
-        tmp.unlink(missing_ok=True)
-    raise ReframeUnavailable(f"Could not download the face detection model {name} ({'; '.join(errors)}).")
+    try:
+        return models.ensure(model)
+    except models.ModelUnavailable as exc:
+        raise ReframeUnavailable(f"Face tracking is unavailable: {exc}") from exc
 
 
 def _box_diff(cur, prev, x0: float, y0: float, x1: float, y1: float) -> float:

@@ -2,6 +2,9 @@ export type ClipLength = "under30" | "under60" | "under90" | "under3min";
 export type Pace = "off" | "natural" | "fast";
 export type Content = "live" | "animation";
 export type Platform = "youtube" | "tiktok" | "instagram";
+export type Factor = "hook" | "payoff" | "standalone" | "energy" | "pacing";
+/** Sounds detected in a clip. */
+export type Cue = "laughter" | "applause" | "shouting" | "music";
 
 /** Results of a posted clip, typed in from the platform's analytics. */
 export interface ClipStats {
@@ -40,7 +43,13 @@ export interface Clip {
   title: string;
   hook: string;
   reason: string;
+  /** Overall ranking score 0-100 (weighted sub-scores). */
   score: number;
+  /** 1 = best clip in the project. */
+  rank?: number;
+  /** Sub-scores 0-100; null when a factor couldn't be measured. */
+  scores?: Record<Factor, number | null> | null;
+  cues?: Cue[];
   status: "pending" | "done";
   video: string | null;
   thumb: string | null;
@@ -82,7 +91,44 @@ export interface Project {
   render_note?: string | null;
   /** Number of past clips with results the AI learned from when picking these clips. */
   learned_from?: number;
+  /** Logged clips the ranking weights were learned from (0 = default weights). */
+  weights_from?: number;
+  countdown?: CountdownJob | null;
   clips: Clip[];
+}
+
+export interface CountdownJob {
+  status: "queued" | "processing" | "done" | "error";
+  progress: number;
+  message: string;
+  error: string | null;
+  /** Best first: items[0] is #1. `title` is the list label; empty = the clip's title. */
+  items: { id: string; title: string }[];
+  title: string;
+  /** Ranks in playback order, e.g. [3, 1, 5, 2, 4]. */
+  reveal?: number[];
+  /** Seconds per clip; null = full clips. */
+  clip_max?: number | null;
+  video: string | null;
+  duration: number | null;
+  rendered_at?: number;
+}
+
+export interface FactorReport {
+  id: Factor;
+  /** Rank correlation with real performance (-1..1); null below 5 clips. */
+  corr: number | null;
+  weight: number;
+  default: number;
+}
+
+export interface RankingReport {
+  weights: Record<Factor, number>;
+  /** Clips the current weights were learned from (0 = defaults). */
+  learned_from: number;
+  with_scores: number;
+  min_needed: number;
+  factors: FactorReport[];
 }
 
 export interface SystemInfo {
@@ -116,5 +162,6 @@ export interface Insights {
   learning: boolean;
   /** Rank correlation between the AI score and real performance (-1..1), null below 5 clips. */
   accuracy: number | null;
+  ranking: RankingReport;
   clips: InsightClip[];
 }

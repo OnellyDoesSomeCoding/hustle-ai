@@ -1,4 +1,4 @@
-import type { ClipStats, Insights, Options, Project, SystemInfo } from "./types";
+import type { ClipStats, CountdownJob, Insights, Options, Project, SystemInfo } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
@@ -32,6 +32,16 @@ export const api = {
   deleteStats: (id: string, clipId: string) =>
     request<Project>(`/api/projects/${id}/clips/${clipId}/stats`, { method: "DELETE" }),
   insights: () => request<Insights>("/api/insights"),
+  makeCountdown: (
+    id: string,
+    body: { items: CountdownJob["items"]; title: string; reveal: number[]; clip_max: number | null },
+  ) =>
+    request<Project>(`/api/projects/${id}/countdown`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteCountdown: (id: string) => request<Project>(`/api/projects/${id}/countdown`, { method: "DELETE" }),
 
   /** Uses XHR so large uploads can report progress. */
   create(source: { url?: string; file?: File }, options: Options, onUpload?: (pct: number) => void) {
@@ -63,6 +73,8 @@ export const api = {
 export const mediaUrl = (projectId: string, rel: string) => `/media/${projectId}/${rel}`;
 export const downloadUrl = (projectId: string, clipId: string, kind: "mp4" | "srt") =>
   `/api/projects/${projectId}/clips/${clipId}/download?kind=${kind}`;
+
+export const countdownDownloadUrl = (projectId: string) => `/api/projects/${projectId}/countdown/download`;
 
 export function fmtTime(sec: number): string {
   const s = Math.max(0, Math.round(sec));

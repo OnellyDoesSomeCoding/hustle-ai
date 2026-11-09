@@ -5,8 +5,8 @@ A local AI clipper: paste a long video link (or upload a file) and get vertical 
 ## How it works
 
 ```
-link / file ──► yt-dlp ──► ffmpeg (audio) ──► faster-whisper (GPU) ──► local LLM via Ollama ──► YuNet faces ──► ffmpeg + NVENC
-                download    16 kHz wav         words + timestamps        picks & scores clips      speaker crop     jump cuts + 9:16 + captions
+link / file ──► yt-dlp ──► ffmpeg (audio) ──► faster-whisper (GPU) ──► YAMNet ──────────► local LLM via Ollama ──► YuNet faces ──► ffmpeg + NVENC
+                download    16 kHz wav         words + timestamps        laughs, loudness    picks & ranks clips       speaker crop     jump cuts + 9:16 + captions
 ```
 
 | Part | Tech |
@@ -17,14 +17,16 @@ link / file ──► yt-dlp ──► ffmpeg (audio) ──► faster-whisper (
 | Transcription | faster-whisper `large-v3-turbo`, CUDA float16 (falls back to CPU) |
 | Clip picking | Ollama + `qwen2.5:7b` (falls back to an offline heuristic) |
 | Post copy | Ollama writes a title, caption, description and hashtags per clip, formatted for YouTube Shorts, TikTok and Instagram Reels with one-click copy (falls back to copy built from the transcript) |
+| Ranking | Every clip gets five sub-scores: **hook**, **payoff** and **standalone** (from the AI, or text checks offline) and measured **energy** (loudness and expression vs. the rest of the video, laughter/applause/shouting, on-screen motion and camera cuts) and **pacing** (words per second after jump cuts, dead air). Sound events come from Google's [YAMNet](https://huggingface.co/audiomagic/yamnet-onnx) (Apache 2.0, 16 MB ONNX, CPU, ~1 s per 4 min of audio). The AI also sees `(laughter)`/`(applause)` cues on transcript lines. Clips show a rank, the breakdown and tags like *Best hook* or *Laughs*, and can be sorted by any factor |
+| Top list video | Pick the top 3/5/10 clips (or any order) and render one "Top N" video: the clips play back to back under a title, and a numbered list on the left fills in as each clip plays, with the ranks revealed in a shuffled order. Labels, reveal order and length per clip (full/30/15/10 s) are editable, with a warning past the 3-minute Shorts limit |
 | Captions | Generated ASS subtitles (Karaoke, Bold Pop, Clean Box), burned in by libass |
 | Jump cuts | Pauses and filler sounds (um, uh…) are cut using the word timestamps; captions are re-timed to match. *Natural* cuts pauses over ~0.6 s, *Fast* over ~0.3 s |
 | Framing | OpenCV YuNet face detection (CPU, model downloads on first use to `data/models/`, with a Hugging Face mirror if GitHub is down). Faces become tracks, mouth movement picks the speaker, and the crop holds still in steady shots that switch on the source's own camera cuts. Groups that fit in the frame are shown together |
 | Animation preset | Choose **Content: Animation** for cartoons and anime (English audio). Adds an anime-face detector ([lbpcascade_animeface](https://github.com/nagadomi/lbpcascade_animeface), MIT), keeps characters who hold still, follows the on-screen action where no face is found, turns jump cuts off, and tells the AI to skip theme songs, recaps and previews |
-| Learning | Log each posted clip's views/likes/comments/shares/% viewed. Once 4 clips have results, curation shows the LLM your best and worst clips as examples. The **Insights** page ranks clips and shows how well the AI score predicted real results |
+| Learning | Log each posted clip's views/likes/comments/shares/% viewed. Once 4 clips have results, curation shows the LLM your best and worst clips as examples. Once 8 clips have results, the ranking weights shift toward the sub-scores that predicted your views (correlations within chance level are ignored). The **Insights** page ranks clips, shows which factors drive your results, and how well the ranking score predicted them |
 | Render | ffmpeg, `h264_nvenc` (falls back to libx264), 1080×1920 |
 
-Projects are stored in `data/projects/<id>/`: the source video, `transcript.json`, `curation.json`, `posts.json`, `stats.json` (logged results) and `clips/<clip>/clip.mp4`. Each step saves its result, so **Retry** and server restarts pick up where they stopped.
+Projects are stored in `data/projects/<id>/`: the source video, `transcript.json`, `signals.json` (loudness and sound events), `curation.json` (picks and scores), `posts.json`, `stats.json` (logged results), `clips/<clip>/clip.mp4` and `countdown/countdown.mp4`. Each step saves its result, so **Retry** and server restarts pick up where they stopped.
 
 ## Requirements
 

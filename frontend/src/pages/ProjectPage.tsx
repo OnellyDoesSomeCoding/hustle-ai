@@ -1,10 +1,12 @@
 import {
-  ArrowLeft, BarChart3, Check, Copy, Download, FileText, Loader2, PenLine, RotateCcw, ScanFace, Scissors, Sparkles,
+  ArrowDownWideNarrow, ArrowLeft, BarChart3, Check, Copy, Download, FileText, Loader2, PenLine, RotateCcw, ScanFace, Scissors, Sparkles,
   Trash2, TrendingUp, TriangleAlert,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, downloadUrl, fmtCount, fmtTime, mediaUrl } from "../api";
+import CountdownPanel from "../components/CountdownPanel";
+import { bestLabels, ClipTags, ScoreBreakdown, SORTS, sortClips, type SortKey } from "../components/Ranking";
 import { ProgressBar, scoreColor, Segmented, StatusBadge } from "../components/ui";
 import { usePolling } from "../hooks";
 import type { Clip, ClipStats, Platform, PostCopy, Project } from "../types";
@@ -318,9 +320,9 @@ function ResultsPanel({
 }
 
 function ClipCard({
-  projectId, clip, platform, editable, animation, onSaved,
+  projectId, clip, platform, editable, animation, best, onSaved,
 }: {
-  projectId: string; clip: Clip; platform: Platform; editable: boolean; animation: boolean;
+  projectId: string; clip: Clip; platform: Platform; editable: boolean; animation: boolean; best?: string[];
   onSaved: (p: Project) => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -349,9 +351,17 @@ function ClipCard({
             Rendering…
           </div>
         )}
-        <span className={`absolute left-2 top-2 rounded-md px-2 py-0.5 text-xs font-bold ${scoreColor(clip.score)}`}>
-          {clip.score}
-        </span>
+        <div className="absolute left-2 top-2 flex items-center gap-1">
+          {clip.rank != null && (
+            <span className="rounded-md bg-black/75 px-1.5 py-0.5 text-xs font-bold tabular-nums">#{clip.rank}</span>
+          )}
+          <span
+            title="Overall ranking score"
+            className={`rounded-md px-2 py-0.5 text-xs font-bold ${scoreColor(clip.score)}`}
+          >
+            {clip.score}
+          </span>
+        </div>
         <span className="absolute right-2 top-2 rounded-md bg-black/70 px-2 py-0.5 text-xs tabular-nums">
           {fmtTime(clip.duration)}
         </span>
@@ -373,6 +383,8 @@ function ClipCard({
       <div className="flex flex-1 flex-col gap-2 p-4">
         <h3 className="font-semibold leading-snug">{clip.title}</h3>
         {clip.hook && <p className="text-sm text-accent">“{clip.hook}”</p>}
+        <ClipTags cues={clip.cues} best={best} />
+        {clip.scores && <ScoreBreakdown scores={clip.scores} />}
         {clip.reason && <p className="text-xs leading-relaxed text-muted">{clip.reason}</p>}
         <p className="text-xs text-muted">
           From {fmtTime(clip.start)} to {fmtTime(clip.end)}
@@ -419,8 +431,10 @@ export default function ProjectPage() {
   const [notFound, setNotFound] = useState(false);
   const [busy, setBusy] = useState(false);
   const [platform, setPlatform] = usePlatform();
+  const [sort, setSort] = useState<SortKey>("rank");
 
   const running = !project || project.status === "processing" || project.status === "queued";
+  const countdownBusy = project?.countdown?.status === "queued" || project?.countdown?.status === "processing";
   usePolling(
     async () => {
       try {
@@ -430,7 +444,7 @@ export default function ProjectPage() {
       }
     },
     1500,
-    running && !notFound,
+    (running || countdownBusy) && !notFound,
   );
 
   if (notFound)
@@ -463,6 +477,8 @@ export default function ProjectPage() {
     }
   };
   const hasPosts = project.clips.some((c) => c.post);
+  const best = bestLabels(project.clips);
+  const clips = sortClips(project.clips, sort);
   const remove = async () => {
     if (!confirm(`Delete "${project.title}" and all its clips?`)) return;
     await api.remove(project.id);
@@ -491,6 +507,15 @@ export default function ProjectPage() {
               </span>
             )}
             {project.curation_mode === "heuristic" && <span>· Heuristic picks</span>}
+            {(project.weights_from ?? 0) > 0 && (
+              <Link
+                to="/insights"
+                className="inline-flex items-center gap-1 hover:text-text"
+                title="Ranking weights were tuned to what predicted your logged results"
+              >
+                · <TrendingUp className="size-3.5 text-ok" /> Ranking tuned on {project.weights_from} clips
+              </Link>
+            )}
             {(project.learned_from ?? 0) > 0 && (
               <Link
                 to="/insights"
@@ -603,20 +628,45 @@ export default function ProjectPage() {
         </div>
       )}
 
+      {project.status === "done" && <CountdownPanel project={project} onChange={setProject} />}
+
       {project.clips.length > 0 && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {project.clips.map((c) => (
-            <ClipCard
-              key={c.id}
-              projectId={project.id}
-              clip={c}
-              platform={platform}
-              editable={project.status === "done" || project.status === "error"}
-              animation={project.options.content === "animation"}
-              onSaved={setProject}
-            />
-          ))}
-        </div>
+        <section className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">
+              {project.clips.length} clip{project.clips.length === 1 ? "" : "s"}
+            </h2>
+            <label className="flex items-center gap-2 text-sm text-muted">
+              <ArrowDownWideNarrow className="size-4" />
+              <span className="sr-only sm:not-sr-only">Sort by</span>
+              <select
+                value={sort}
+                onChange={(e) => setSort(e.target.value as SortKey)}
+                className="rounded-lg border border-line bg-bg px-2 py-1.5 text-sm text-text outline-none focus:border-accent/60"
+              >
+                {SORTS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {clips.map((c) => (
+              <ClipCard
+                key={c.id}
+                projectId={project.id}
+                clip={c}
+                platform={platform}
+                editable={project.status === "done" || project.status === "error"}
+                animation={project.options.content === "animation"}
+                best={best[c.id]}
+                onSaved={setProject}
+              />
+            ))}
+          </div>
+        </section>
       )}
     </div>
   );

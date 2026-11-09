@@ -18,6 +18,8 @@ from typing import Any
 from .store import store
 
 MIN_LOGGED = 4      # clips with results needed before the AI starts learning from them
+MIN_FOR_WEIGHTS = 8  # clips with results (and a score breakdown) before the ranking re-weights itself
+PRIOR = 10          # the default weights count as this many clips of evidence
 EXAMPLE_WORDS = 45  # opening words of each example clip shown to the AI
 METRICS = ("views", "likes", "comments", "shares", "retention", "platform")
 
@@ -61,7 +63,7 @@ def save(project_id: str, clip: dict, stats: dict) -> dict:
             **{k: stats.get(k) for k in METRICS},
             "updated_at": time.time(),
             "title": clip["title"], "hook": clip.get("hook", ""), "score": clip["score"],
-            "duration": clip["duration"],
+            "duration": clip["duration"], "scores": clip.get("scores"),
             "text": old.get("text") or _clip_text(project_id, clip),
         }
         _path(project_id).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -186,3 +188,42 @@ def examples(exclude: str | None = None) -> tuple[str | None, int]:
         "Still judge every moment on its own merits."
     )
     return "\n".join(text), len(rows)
+
+
+# ---- ranking weights ----------------------------------------------------------------
+
+def factor_weights(exclude: str | None = None) -> dict:
+    """How much each ranking factor (hook, payoff, ...) predicted the creator's real results.
+
+    Returns {"weights", "learned_from", "factors": [{"id", "corr", "weight", "default"}]}.
+    Each factor's weight follows its rank correlation with performance (factors that don't
+    help get none, and correlations within chance level are ignored), blended with the defaults so a handful of clips can't swing it wildly.
+    """
+    from .pipeline.scoring import DEFAULT_WEIGHTS, FACTORS
+
+    rows = [r for r in all_logged(exclude) if isinstance(r.get("scores"), dict)]
+    corr: dict[str, float | None] = {}
+    for f in FACTORS:
+        pairs = [(r["scores"][f], r["perf"]) for r in rows if r["scores"].get(f) is not None]
+        corr[f] = spearman([p[0] for p in pairs], [p[1] for p in pairs]) if pairs else None
+
+    weights, n = dict(DEFAULT_WEIGHTS), len(rows)
+    if n >= MIN_FOR_WEIGHTS:
+        # With few clips a correlation of ~1/sqrt(n) happens by chance, so only the part beyond
+        # that counts, and it's trusted more as clips add up. A factor that predicts views well
+        # can reach ~3x its default weight; one that works against them drops to as low as 1/4.
+        noise, trust = 1 / math.sqrt(n - 1), n / (n + PRIOR)
+        for f in FACTORS:
+            r = corr[f] or 0.0
+            effect = math.copysign(max(0.0, abs(r) - noise), r) * trust
+            weights[f] = DEFAULT_WEIGHTS[f] * min(3.0, max(0.25, 1 + 2.5 * effect))
+        total = sum(weights.values())
+        weights = {f: w / total for f, w in weights.items()}
+    return {
+        "weights": {f: round(w, 3) for f, w in weights.items()},
+        "learned_from": n if n >= MIN_FOR_WEIGHTS else 0,
+        "with_scores": n,
+        "min_needed": MIN_FOR_WEIGHTS,
+        "factors": [{"id": f, "corr": None if corr[f] is None else round(corr[f], 2),
+                     "weight": round(weights[f], 3), "default": DEFAULT_WEIGHTS[f]} for f in FACTORS],
+    }

@@ -1,9 +1,10 @@
-import { BarChart3, Film, Sparkles, Target, TrendingUp } from "lucide-react";
+import { BarChart3, Film, Scale, Sparkles, Target, TrendingUp } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, fmtCount, fmtTime, mediaUrl } from "../api";
+import { FACTORS } from "../components/Ranking";
 import { ProgressBar, scoreColor } from "../components/ui";
-import type { InsightClip, Insights as InsightsData } from "../types";
+import type { InsightClip, Insights as InsightsData, RankingReport } from "../types";
 
 const PLATFORM_LABEL = { youtube: "Shorts", tiktok: "TikTok", instagram: "Reels" } as const;
 
@@ -55,12 +56,79 @@ function Row({ clip, rank, total }: { clip: InsightClip; rank: number; total: nu
         <span className="text-[10px] text-muted">views</span>
       </div>
       <span
-        title="The AI's score when it picked this clip"
+        title="The ranking score when the clip was picked"
         className={`shrink-0 rounded-md px-2 py-0.5 text-xs font-bold ${scoreColor(clip.score)}`}
       >
         {clip.score}
       </span>
     </Link>
+  );
+}
+
+function corrLabel(r: number | null) {
+  if (r == null) return { text: "not enough data", tone: "text-muted" };
+  if (r >= 0.4) return { text: "strong predictor", tone: "text-ok" };
+  if (r >= 0.15) return { text: "some effect", tone: "text-warn" };
+  if (r > -0.15) return { text: "no clear effect", tone: "text-muted" };
+  return { text: "opposite effect", tone: "text-danger" };
+}
+
+/** Which ranking factors predicted the creator's real results, and the weights in use. */
+function RankingCard({ ranking }: { ranking: RankingReport }) {
+  const tuned = ranking.learned_from > 0;
+  const remaining = Math.max(0, ranking.min_needed - ranking.with_scores);
+  const byId = Object.fromEntries(ranking.factors.map((f) => [f.id, f]));
+  const top = [...ranking.factors].filter((f) => f.corr != null).sort((a, b) => b.corr! - a.corr!)[0];
+  return (
+    <div className="rounded-2xl border border-line bg-panel p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-medium">
+          <Scale className="size-4 text-accent" /> What drives your results
+        </div>
+        <span className={`text-xs ${tuned ? "text-ok" : "text-muted"}`}>
+          {tuned
+            ? `Ranking tuned on ${ranking.learned_from} clips`
+            : `Default weights · log ${remaining} more clip${remaining === 1 ? "" : "s"} to tune`}
+        </span>
+      </div>
+      <p className="mt-2 text-xs text-muted">
+        Every clip gets five sub-scores; the overall score weights them. Once {ranking.min_needed} clips have results,
+        the weights shift toward the factors that actually predicted your views.
+        {tuned && top && top.corr! >= 0.15 && (
+          <>
+            {" "}So far, <b className="text-text">{FACTORS.find((f) => f.id === top.id)?.label.toLowerCase()}</b> matters
+            most for your audience.
+          </>
+        )}
+      </p>
+      <div className="mt-4 space-y-2.5">
+        {FACTORS.map((f) => {
+          const r = byId[f.id];
+          const label = corrLabel(r?.corr ?? null);
+          return (
+            <div key={f.id} className="grid grid-cols-[6.5rem_1fr_3rem] items-center gap-3" title={f.help}>
+              <div>
+                <div className="text-sm">{f.label}</div>
+                <div className={`text-[10px] ${label.tone}`}>{label.text}</div>
+              </div>
+              <div className="relative h-2 rounded-full bg-line">
+                <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(100, (r?.weight ?? 0) * 200)}%` }} />
+                <div
+                  className="absolute top-[-3px] h-3.5 w-0.5 rounded bg-muted"
+                  style={{ left: `${Math.min(100, (r?.default ?? 0) * 200)}%` }}
+                  title="Default weight"
+                />
+              </div>
+              <div className="text-right text-xs tabular-nums text-muted">{Math.round((r?.weight ?? 0) * 100)}%</div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-3 text-[11px] text-muted">
+        Bars show each factor's weight (the tick is the default). Clips logged before ranking existed have no
+        sub-scores and don't count here.
+      </p>
+    </div>
   );
 }
 
@@ -120,11 +188,11 @@ export default function Insights() {
         </div>
         <div className="rounded-2xl border border-line bg-panel p-5">
           <div className="flex items-center gap-2 text-sm font-medium">
-            <Target className="size-4 text-accent" /> AI score vs. real results
+            <Target className="size-4 text-accent" /> Ranking score vs. real results
           </div>
           {data.accuracy == null ? (
             <p className="mt-3 text-sm text-muted">
-              Shows how well the AI's virality score predicted your real results, once 5 clips have results.
+              Shows how well each clip's ranking score predicted its real results, once 5 clips have results.
             </p>
           ) : (
             <>
@@ -139,6 +207,8 @@ export default function Insights() {
           )}
         </div>
       </div>
+
+      <RankingCard ranking={data.ranking} />
 
       <section>
         <h2 className="mb-3 flex items-center gap-2 text-lg font-semibold">
