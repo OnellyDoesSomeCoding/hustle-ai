@@ -318,8 +318,11 @@ function ResultsPanel({
 }
 
 function ClipCard({
-  projectId, clip, platform, editable, onSaved,
-}: { projectId: string; clip: Clip; platform: Platform; editable: boolean; onSaved: (p: Project) => void }) {
+  projectId, clip, platform, editable, animation, onSaved,
+}: {
+  projectId: string; clip: Clip; platform: Platform; editable: boolean; animation: boolean;
+  onSaved: (p: Project) => void;
+}) {
   const [copied, setCopied] = useState(false);
   const ready = clip.status === "done" && clip.video;
 
@@ -356,7 +359,7 @@ function ClipCard({
           <div className="pointer-events-none absolute left-2 top-9 flex flex-col items-start gap-1">
             {clip.framing === "face" && (
               <span className="flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px]">
-                <ScanFace className="size-3" /> Speaker
+                <ScanFace className="size-3" /> {animation ? "Tracked" : "Speaker"}
               </span>
             )}
             {(clip.trimmed ?? 0) >= 0.5 && (
@@ -481,6 +484,7 @@ export default function ProjectPage() {
             <StatusBadge status={project.status} />
             {project.media && <span>{fmtTime(project.media.duration)} source</span>}
             {project.language && <span>· {project.language.toUpperCase()}</span>}
+            {project.options.content === "animation" && <span>· Animation</span>}
             {project.curation_mode === "llm" && (
               <span className="inline-flex items-center gap-1">
                 · <Sparkles className="size-3.5 text-accent" /> AI-picked
@@ -608,6 +612,7 @@ export default function ProjectPage() {
               clip={c}
               platform={platform}
               editable={project.status === "done" || project.status === "error"}
+              animation={project.options.content === "animation"}
               onSaved={setProject}
             />
           ))}

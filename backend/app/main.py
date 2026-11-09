@@ -28,6 +28,7 @@ class Options(BaseModel):
     hook_title: bool = True
     pace: Literal["off", "natural", "fast"] = "natural"  # jump cuts: remove pauses and filler words
     reframe: Literal["face", "center"] = "face"  # face-tracked or centred 9:16 crop
+    content: Literal["live", "animation"] = "live"  # animation: anime faces + action tracking, cartoon-aware picks
     start: Optional[float] = Field(None, ge=0)
     end: Optional[float] = Field(None, ge=0)
 

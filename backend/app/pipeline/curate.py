@@ -42,6 +42,11 @@ For each clip return:
 - reason: one short sentence on why it works.
 Write title and hook in the same language as the transcript. Respond with JSON only."""
 
+ANIMATION_GUIDANCE = """This video is an animated show (cartoon or anime, English audio).
+Skip opening and ending theme songs, song lyrics, recaps, "next episode" previews and credits.
+Prefer funny, dramatic, emotional or quotable dialogue moments that make sense to someone who
+hasn't seen the show, and include the reaction or punchline that pays the moment off."""
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -167,7 +172,7 @@ def _windows(units: list[dict]) -> list[tuple[int, int]]:
     return windows
 
 
-def _ask_llm(lines: str, wanted: int, lo: float, hi: float, learned: str | None = None) -> list[dict]:
+def _ask_llm(lines: str, wanted: int, lo: float, hi: float, guidance: str | None = None) -> list[dict]:
     user = (
         f"Find the {wanted} best clips. Each clip must be between {int(lo)} and {int(hi)} seconds long "
         f"(use the mm:ss timestamps to judge length).\n\nTranscript:\n{lines}"
@@ -176,7 +181,7 @@ def _ask_llm(lines: str, wanted: int, lo: float, hi: float, learned: str | None 
         f"{OLLAMA_URL}/api/chat",
         json={
             "model": OLLAMA_MODEL,
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT + ("\n\n" + learned if learned else "")},
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT + ("\n\n" + guidance if guidance else "")},
                          {"role": "user", "content": user}],
             "stream": False,
             "format": SCHEMA,
@@ -198,8 +203,9 @@ def unload_llm() -> None:
 
 
 def curate_llm(units: list[dict], count: int, lo: float, hi: float, on_progress: Callable[[float, str], None],
-               learned: str | None = None) -> list[dict]:
-    """`learned` = examples of the creator's past clips and how they performed (see learning.py)."""
+               guidance: str | None = None) -> list[dict]:
+    """`guidance` = extra instructions: content hints and examples of the creator's past
+    clips with their results (see learning.py)."""
     windows = _windows(units)
     total_span = max(units[-1]["end"] - units[0]["start"], 1)
     cands: list[dict] = []
@@ -210,7 +216,7 @@ def curate_llm(units: list[dict], count: int, lo: float, hi: float, on_progress:
         wanted = max(3, math.ceil(count * span / total_span) + 2)
         lines = "\n".join(f"[{i}] {_fmt(units[i]['start'])} {units[i]['text']}" for i in range(a, b + 1))
         try:
-            raw = _ask_llm(lines, wanted, lo, hi, learned)
+            raw = _ask_llm(lines, wanted, lo, hi, guidance)
         except Exception as exc:
             print(f"[curate] LLM window {n} failed: {exc}")
             errors += 1
@@ -277,7 +283,7 @@ def curate_heuristic(units: list[dict], count: int, lo: float, hi: float) -> lis
 
 
 def curate(segments: list[dict], length_key: str, max_clips: int,
-           on_progress: Callable[[float, str], None], learned: str | None = None) -> tuple[list[dict], str, str | None]:
+           on_progress: Callable[[float, str], None], guidance: str | None = None) -> tuple[list[dict], str, str | None]:
     """Returns (clips, mode, note). mode is "llm" or "heuristic"."""
     units = build_units(segments)
     if not units:
@@ -292,7 +298,7 @@ def curate(segments: list[dict], length_key: str, max_clips: int,
     note = None
     if status["running"] and status["model_ready"]:
         try:
-            return curate_llm(units, count, lo, hi, on_progress, learned), "llm", None
+            return curate_llm(units, count, lo, hi, on_progress, guidance), "llm", None
         except Exception as exc:
             note = f"AI curation failed ({exc}); used the offline heuristic instead."
     elif status["running"]:

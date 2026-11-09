@@ -9,4 +9,4 @@ av<19
 nvidia-cublas-cu12
 nvidia-cudnn-cu12==9.*
 # Face tracking (YuNet detector, CPU)
-opencv-python-headless>=4.8
+opencv-python-headless>=4.8,<5  # 5.x dropped CascadeClassifier (anime faces)

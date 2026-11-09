@@ -7,6 +7,12 @@ the crop holds still while the speaker stays put and cuts to a new position when
 the speaker changes or the scene cuts. That looks like an edited multi-cam shot
 instead of a camera that wobbles after every head movement.
 
+Animation mode adds an anime-face detector, keeps characters who hold still (in
+limited animation that's normal, not a poster on the wall), and where no face is
+found (most Western cartoons) follows the on-screen action instead: the centre of
+the pixels that change between frames, which is usually the character moving or
+talking.
+
 Everything here runs on the CPU (a 60 s clip takes a few seconds), so it doesn't
 compete with Whisper or Ollama for GPU memory.
 """
@@ -24,8 +30,16 @@ from ..config import DATA_DIR, ffmpeg_path
 from .edit import Timeline
 from .media import _NO_WINDOW, OUT_H, OUT_W, MediaError
 
-MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
-MODEL_PATH = DATA_DIR / "models" / "face_detection_yunet_2023mar.onnx"
+MODELS_DIR = DATA_DIR / "models"
+# Each model has a mirror, so one site being down doesn't turn face tracking off.
+YUNET = ("face_detection_yunet_2023mar.onnx", 100_000, [
+    "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx",
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+])
+ANIME = ("lbpcascade_animeface.xml", 100_000, [  # nagadomi/lbpcascade_animeface, MIT licence
+    "https://raw.githubusercontent.com/nagadomi/lbpcascade_animeface/master/lbpcascade_animeface.xml",
+    "https://github.com/nagadomi/lbpcascade_animeface/raw/master/lbpcascade_animeface.xml",
+])
 
 SAMPLE_FPS = 5        # face samples per second
 DETECT_W = 960        # frames are scaled to this width (small faces need the pixels for mouth movement)
@@ -37,6 +51,7 @@ HOLD = 3              # samples the subject must stay outside the dead zone to r
 MIN_SHOT = 1.0        # seconds; shorter shots are merged into the previous one
 STATIC_MOTION = 0.12  # average mouth movement below this = a photo, not a person
 MAX_GAP = 1.5         # seconds without faces to bridge with the last position; longer gaps centre the crop
+ACTION_W = 160        # width of the tiny frames used to find on-screen action (animation)
 
 
 class ReframeUnavailable(RuntimeError):
@@ -61,25 +76,30 @@ def needs_tracking(media: dict) -> bool:
     return media["width"] / media["height"] > OUT_W / OUT_H * 1.05
 
 
-def _ensure_model() -> Path:
-    if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 100_000:
-        return MODEL_PATH
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = MODEL_PATH.with_suffix(".part")
-    try:
-        with httpx.stream("GET", MODEL_URL, follow_redirects=True, timeout=60) as r:
-            r.raise_for_status()
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_bytes():
-                    f.write(chunk)
-    except Exception as exc:
+def _ensure_model(model: tuple[str, int, list[str]] = YUNET) -> Path:
+    """Downloads a model on first use (trying each mirror) and returns its path."""
+    name, min_size, urls = model
+    path = MODELS_DIR / name
+    if path.exists() and path.stat().st_size > min_size:
+        return path
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".part")
+    errors = []
+    for url in urls:
+        try:
+            with httpx.stream("GET", url, follow_redirects=True, timeout=60) as r:
+                r.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_bytes():
+                        f.write(chunk)
+            if tmp.stat().st_size > min_size:
+                tmp.replace(path)
+                return path
+            errors.append(f"{url}: incomplete download")
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
         tmp.unlink(missing_ok=True)
-        raise ReframeUnavailable(f"Could not download the face detection model ({exc}).") from exc
-    if tmp.stat().st_size < 100_000:
-        tmp.unlink(missing_ok=True)
-        raise ReframeUnavailable("The face detection model download was incomplete.")
-    tmp.replace(MODEL_PATH)
-    return MODEL_PATH
+    raise ReframeUnavailable(f"Could not download the face detection model {name} ({'; '.join(errors)}).")
 
 
 def _box_diff(cur, prev, x0: float, y0: float, x1: float, y1: float) -> float:
@@ -93,14 +113,30 @@ def _box_diff(cur, prev, x0: float, y0: float, x1: float, y1: float) -> float:
     return float(abs(a - b).mean())
 
 
-def sample_faces(src: Path, start: float, dur: float, media: dict) -> list[list[Face]]:
-    """Faces in each sample (SAMPLE_FPS per second) of the source range."""
+def _overlaps(box: tuple[float, float, float, float], others: list[tuple[float, float, float, float]]) -> bool:
+    x, y, w, h = box
+    cx, cy = x + w / 2, y + h / 2
+    return any(ox <= cx <= ox + ow and oy <= cy <= oy + oh for ox, oy, ow, oh in others)
+
+
+def sample_faces(src: Path, start: float, dur: float, media: dict,
+                 animation: bool = False) -> tuple[list[list[Face]], list[float | None]]:
+    """Faces in each sample (SAMPLE_FPS per second) of the source range, and (animation
+    only) the centre x of the on-screen action per sample (None when unclear)."""
     try:
         import cv2
         import numpy as np
     except ImportError as exc:
         raise ReframeUnavailable("OpenCV isn't installed (pip install opencv-python-headless).") from exc
     model = _ensure_model()
+    anime = None
+    if animation:
+        try:
+            anime = cv2.CascadeClassifier(str(_ensure_model(ANIME)))
+            if anime.empty():
+                anime = None
+        except (ReframeUnavailable, AttributeError) as exc:  # AttributeError: OpenCV 5 has no cascades
+            print(f"[reframe] anime face detector unavailable, using faces + action only: {exc}")
     ffmpeg = ffmpeg_path()
     if not ffmpeg:
         raise MediaError("ffmpeg not found.")
@@ -115,7 +151,11 @@ def sample_faces(src: Path, start: float, dur: float, media: dict) -> list[list[
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW,
     )
     samples: list[list[Face]] = []
+    actions: list[float | None] = []
     prev_gray = None
+    prev_small = None
+    small_h = max(2, round(ACTION_W * h / w))
+    min_anime = max(24, h // 12)
     try:
         while True:
             buf = proc.stdout.read(frame_bytes)
@@ -125,11 +165,13 @@ def sample_faces(src: Path, start: float, dur: float, media: dict) -> list[list[
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             _, found = detector.detect(frame)
             faces = []
+            boxes: list[tuple[float, float, float, float]] = []
             for f in (found if found is not None else []):
                 x, y, fw, fh = (float(v) for v in f[:4])
                 area = fw * fh / (w * h)
                 if area < MIN_FACE_AREA:
                     continue
+                boxes.append((x, y, fw, fh))
                 motion = 0.0
                 if prev_gray is not None:
                     # Landmarks: right eye, left eye, nose, right mouth corner, left mouth corner.
@@ -142,12 +184,39 @@ def sample_faces(src: Path, start: float, dur: float, media: dict) -> list[list[
                     eyes = _box_diff(gray, prev_gray, x, eye_y - 0.15 * fh, x + fw, eye_y + 0.10 * fh)
                     motion = mouth / (eyes + 4.0)
                 faces.append(Face(cx=(x + fw / 2) / w, area=area, motion=motion))
+            if anime is not None:
+                found_a = anime.detectMultiScale(cv2.equalizeHist(gray), scaleFactor=1.1, minNeighbors=5,
+                                                 minSize=(min_anime, min_anime))
+                for (x, y, fw, fh) in (found_a if len(found_a) else []):
+                    x, y, fw, fh = float(x), float(y), float(fw), float(fh)
+                    if fw * fh / (w * h) < MIN_FACE_AREA or _overlaps((x, y, fw, fh), boxes):
+                        continue
+                    boxes.append((x, y, fw, fh))
+                    motion = 0.0
+                    if prev_gray is not None:
+                        # No landmarks here: anime mouths sit in the lower part of the box, eyes in the middle.
+                        mouth = _box_diff(gray, prev_gray, x + 0.2 * fw, y + 0.62 * fh, x + 0.8 * fw, y + 0.98 * fh)
+                        eyes = _box_diff(gray, prev_gray, x, y + 0.25 * fh, x + fw, y + 0.5 * fh)
+                        motion = mouth / (eyes + 4.0)
+                    faces.append(Face(cx=(x + fw / 2) / w, area=fw * fh / (w * h), motion=motion))
+            if animation:
+                small = cv2.resize(gray, (ACTION_W, small_h), interpolation=cv2.INTER_AREA)
+                action = None
+                if prev_small is not None:
+                    moved = cv2.absdiff(small, prev_small) > 18
+                    share = float(moved.mean())
+                    # Too little = noise; too much = a camera pan or a scene cut, not a subject.
+                    if 0.003 < share < 0.25:
+                        cols = moved.sum(axis=0)
+                        action = float((cols * np.arange(ACTION_W)).sum() / cols.sum() + 0.5) / ACTION_W
+                actions.append(action)
+                prev_small = small
             samples.append(faces)
             prev_gray = gray
     finally:
         proc.stdout.close()
         proc.wait()
-    return samples
+    return samples, actions
 
 
 def scene_cuts(src: Path, start: float, dur: float) -> list[float]:
@@ -180,7 +249,7 @@ def _snap(shots: list[tuple[float, float]], cuts: list[float]) -> list[tuple[flo
     return out
 
 
-def _build_tracks(samples: list[list[Face]]) -> list[Track]:
+def _build_tracks(samples: list[list[Face]], animation: bool = False) -> list[Track]:
     tracks: list[Track] = []
     for i, faces in enumerate(samples):
         taken: set[int] = set()
@@ -199,9 +268,14 @@ def _build_tracks(samples: list[list[Face]]) -> list[Track]:
             taken.add(best)
     # Drop flickers (false detections) and faces that never move: photos and posters on
     # the wall. Short tracks stay, because multi-cam edits show each angle only briefly.
+    # In animation a character holding still is normal, so only flickers are dropped.
     def alive(t: Track) -> bool:
+        if len(t.seen) < 3:
+            return False
+        if animation:
+            return True
         motions = [f.motion for i, f in t.seen.items() if i > 0]
-        return len(t.seen) >= 3 and bool(motions) and sum(motions) / len(motions) >= STATIC_MOTION
+        return bool(motions) and sum(motions) / len(motions) >= STATIC_MOTION
     keep = [t for t in tracks if alive(t)]
     return keep or sorted(tracks, key=lambda t: len(t.seen), reverse=True)[:1]
 
@@ -293,17 +367,29 @@ def _shots(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
     return shots_out
 
 
-def plan(src: Path, start: float, dur: float, media: dict, timeline: Timeline) -> str | None:
+def _smooth_actions(actions: list[float | None]) -> list[float | None]:
+    """Median over ~1 s, so the crop follows the action without twitching."""
+    out: list[float | None] = []
+    for i in range(len(actions)):
+        near = [a for a in actions[max(0, i - 2):i + 3] if a is not None]
+        out.append(statistics.median(near) if len(near) >= 2 else None)
+    return out
+
+
+def plan(src: Path, start: float, dur: float, media: dict, timeline: Timeline,
+         animation: bool = False) -> str | None:
     """ffmpeg expression for the crop centre (0..1 of the width) over output time `t`,
-    or None when no faces were found (the caller then uses a centre crop)."""
-    samples = sample_faces(src, start, dur, media)
-    if not any(samples):
+    or None when there was nothing to follow (the caller then uses a centre crop)."""
+    samples, actions = sample_faces(src, start, dur, media, animation)
+    actions = _smooth_actions(actions) if animation else [None] * len(samples)
+    if not any(samples) and not any(a is not None for a in actions):
         return None
-    tracks = _build_tracks(samples)
+    tracks = _build_tracks(samples, animation) if any(samples) else []
     crop_frac = media["height"] * OUT_W / OUT_H / media["width"]
-    path = _speaker_path(samples, tracks, crop_frac)
+    path = _speaker_path(samples, tracks, crop_frac) if tracks else [None] * len(samples)
     # Bridge short gaps (someone looks away) with the last position. Long gaps are
-    # usually a different camera angle with no usable face, so those get centred.
+    # usually a different camera angle with no usable face: those follow the on-screen
+    # action (animation) or get centred.
     filled: list[float] = []
     last, i = next((p for p in path if p is not None), 0.5), 0
     while i < len(path):
@@ -315,7 +401,13 @@ def plan(src: Path, start: float, dur: float, media: dict, timeline: Timeline) -
         j = i
         while j < len(path) and path[j] is None:
             j += 1
-        filled.extend([last if (j - i) / SAMPLE_FPS <= MAX_GAP else 0.5] * (j - i))
+        if (j - i) / SAMPLE_FPS <= MAX_GAP and any(p is not None for p in path):  # `last` = nearest face
+            filled.extend([last] * (j - i))
+        else:
+            held = None
+            for k in range(i, j):
+                held = actions[k] if actions[k] is not None else held
+                filled.append(held if held is not None else 0.5)
         i = j
     points: list[tuple[float, float]] = []
     for i, last in enumerate(filled):

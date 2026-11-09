@@ -19,7 +19,8 @@ link / file ──► yt-dlp ──► ffmpeg (audio) ──► faster-whisper (
 | Post copy | Ollama writes a title, caption, description and hashtags per clip, formatted for YouTube Shorts, TikTok and Instagram Reels with one-click copy (falls back to copy built from the transcript) |
 | Captions | Generated ASS subtitles (Karaoke, Bold Pop, Clean Box), burned in by libass |
 | Jump cuts | Pauses and filler sounds (um, uh…) are cut using the word timestamps; captions are re-timed to match. *Natural* cuts pauses over ~0.6 s, *Fast* over ~0.3 s |
-| Framing | OpenCV YuNet face detection (CPU, model downloads on first use to `data/models/`). Faces become tracks, mouth movement picks the speaker, and the crop holds still in steady shots that switch on the source's own camera cuts. Groups that fit in the frame are shown together |
+| Framing | OpenCV YuNet face detection (CPU, model downloads on first use to `data/models/`, with a Hugging Face mirror if GitHub is down). Faces become tracks, mouth movement picks the speaker, and the crop holds still in steady shots that switch on the source's own camera cuts. Groups that fit in the frame are shown together |
+| Animation preset | Choose **Content: Animation** for cartoons and anime (English audio). Adds an anime-face detector ([lbpcascade_animeface](https://github.com/nagadomi/lbpcascade_animeface), MIT), keeps characters who hold still, follows the on-screen action where no face is found, turns jump cuts off, and tells the AI to skip theme songs, recaps and previews |
 | Learning | Log each posted clip's views/likes/comments/shares/% viewed. Once 4 clips have results, curation shows the LLM your best and worst clips as examples. The **Insights** page ranks clips and shows how well the AI score predicted real results |
 | Render | ffmpeg, `h264_nvenc` (falls back to libx264), 1080×1920 |
 

@@ -2,7 +2,7 @@ import { ChevronDown, Film, Link2, Loader2, Upload, Wand2, X } from "lucide-reac
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, parseTime } from "../api";
-import type { ClipLength, Options, Pace } from "../types";
+import type { ClipLength, Content, Options, Pace } from "../types";
 import { Field, inputClass, ProgressBar, Segmented } from "./ui";
 
 const LENGTHS: { value: ClipLength; label: string }[] = [
@@ -25,10 +25,14 @@ const PACE_HINT: Record<Pace, string> = {
   fast: "cuts pauses over 0.3s and ums",
 };
 
-const FRAMINGS: { value: Options["reframe"]; label: string }[] = [
-  { value: "face", label: "Follow speaker" },
-  { value: "center", label: "Centre" },
+const CONTENTS: { value: Content; label: string }[] = [
+  { value: "live", label: "Real people" },
+  { value: "animation", label: "Animation" },
 ];
+const CONTENT_HINT: Record<Content, string> = {
+  live: "podcasts, interviews, vlogs, streams",
+  animation: "cartoons & anime (English audio)",
+};
 
 const LANGUAGES: [string, string][] = [
   ["auto", "Auto-detect"], ["en", "English"], ["es", "Spanish"], ["pt", "Portuguese"], ["fr", "French"],
@@ -65,6 +69,16 @@ export default function NewProjectForm({ onCreated }: { onCreated?: () => void }
   const [hookTitle, setHookTitle] = useState(true);
   const [pace, setPace] = useState<Pace>("natural");
   const [reframe, setReframe] = useState<Options["reframe"]>("face");
+  const [content, setContent] = useState<Content>("live");
+  // Pauses in animation are usually dramatic beats or action, so the preset turns jump cuts off.
+  const chooseContent = (c: Content) => {
+    setContent(c);
+    setPace(c === "animation" ? "off" : "natural");
+  };
+  const framings: { value: Options["reframe"]; label: string }[] = [
+    { value: "face", label: content === "animation" ? "Follow characters" : "Follow speaker" },
+    { value: "center", label: "Centre" },
+  ];
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [startText, setStartText] = useState("");
   const [endText, setEndText] = useState("");
@@ -97,6 +111,7 @@ export default function NewProjectForm({ onCreated }: { onCreated?: () => void }
       hook_title: hookTitle,
       pace,
       reframe,
+      content,
       start,
       end,
     };
@@ -201,7 +216,13 @@ export default function NewProjectForm({ onCreated }: { onCreated?: () => void }
       )}
 
       {/* Options */}
-      <div className="mt-6 grid gap-5 md:grid-cols-3">
+      <div className="mt-6">
+        <Field label="Content" hint={CONTENT_HINT[content]}>
+          <Segmented value={content} options={CONTENTS} onChange={chooseContent} />
+        </Field>
+      </div>
+
+      <div className="mt-5 grid gap-5 md:grid-cols-3">
         <Field label="Clip length">
           <Segmented value={length} options={LENGTHS} onChange={setLength} />
         </Field>
@@ -251,8 +272,17 @@ export default function NewProjectForm({ onCreated }: { onCreated?: () => void }
         <Field label="Jump cuts" hint={PACE_HINT[pace]}>
           <Segmented value={pace} options={PACES} onChange={setPace} />
         </Field>
-        <Field label="Framing" hint={reframe === "face" ? "crops to whoever is talking" : "fixed centre crop"}>
-          <Segmented value={reframe} options={FRAMINGS} onChange={setReframe} />
+        <Field
+          label="Framing"
+          hint={
+            reframe === "center"
+              ? "fixed centre crop"
+              : content === "animation"
+                ? "follows faces, then the action"
+                : "crops to whoever is talking"
+          }
+        >
+          <Segmented value={reframe} options={framings} onChange={setReframe} />
         </Field>
       </div>
 

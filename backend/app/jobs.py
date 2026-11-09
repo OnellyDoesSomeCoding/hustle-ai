@@ -117,8 +117,10 @@ def _run(project_id: str) -> None:
     else:
         report(0.0, "Finding the best moments…")
         learned, learned_from = learning.examples(exclude=project_id)
+        hint = curate.ANIMATION_GUIDANCE if opts.get("content") == "animation" else None
+        guidance = "\n\n".join(g for g in (hint, learned) if g) or None
         picked, mode, note = curate.curate(segments, opts.get("length", "under60"), int(opts.get("max_clips") or 0),
-                                           report, learned)
+                                           report, guidance)
         cur = {"clips": picked, "mode": mode, "note": note, "learned_from": learned_from if mode == "llm" else 0}
         curation_path.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
     if not cur["clips"]:
@@ -162,6 +164,7 @@ def _run(project_id: str) -> None:
     template = opts.get("caption_template", "karaoke")
     pace = opts.get("pace", "natural")
     track_faces = opts.get("reframe", "face") == "face" and reframe.needs_tracking(info)
+    animation = opts.get("content") == "animation"
     render_note = None
     for i, clip in enumerate(clips):
         label = f"clip {i + 1} of {len(clips)}"
@@ -190,9 +193,9 @@ def _run(project_id: str) -> None:
         if not (clip_dir / "clip.mp4").exists():
             center_x = None
             if track_faces and render_note is None:
-                report(i / len(clips), f"Finding faces in {label}…")
+                report(i / len(clips), f"Finding {'characters' if animation else 'faces'} in {label}…")
                 try:
-                    center_x = reframe.plan(source, clip["start"], src_dur, info, timeline)
+                    center_x = reframe.plan(source, clip["start"], src_dur, info, timeline, animation)
                 except reframe.ReframeUnavailable as exc:
                     render_note = f"{exc} Clips use a centre crop instead."
                     store.update(project_id, render_note=render_note)

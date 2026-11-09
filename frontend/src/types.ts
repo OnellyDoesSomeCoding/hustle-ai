@@ -1,5 +1,6 @@
 export type ClipLength = "under30" | "under60" | "under90" | "under3min";
 export type Pace = "off" | "natural" | "fast";
+export type Content = "live" | "animation";
 export type Platform = "youtube" | "tiktok" | "instagram";
 
 /** Results of a posted clip, typed in from the platform's analytics. */
@@ -24,6 +25,8 @@ export interface Options {
   pace: Pace;
   /** Face-tracked or centred 9:16 crop. */
   reframe: "face" | "center";
+  /** Animation: anime-face detection, action tracking and cartoon-aware clip picking. */
+  content: Content;
   start: number | null;
   end: number | null;
 }
