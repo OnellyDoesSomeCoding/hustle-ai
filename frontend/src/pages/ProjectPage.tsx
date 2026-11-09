@@ -1,12 +1,13 @@
 import {
-  ArrowLeft, Check, Copy, Download, FileText, Loader2, PenLine, RotateCcw, Sparkles, Trash2, TriangleAlert,
+  ArrowLeft, BarChart3, Check, Copy, Download, FileText, Loader2, PenLine, RotateCcw, ScanFace, Scissors, Sparkles,
+  Trash2, TrendingUp, TriangleAlert,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, downloadUrl, fmtTime, mediaUrl } from "../api";
+import { api, downloadUrl, fmtCount, fmtTime, mediaUrl } from "../api";
 import { ProgressBar, scoreColor, Segmented, StatusBadge } from "../components/ui";
 import { usePolling } from "../hooks";
-import type { Clip, PostCopy, Project } from "../types";
+import type { Clip, ClipStats, Platform, PostCopy, Project } from "../types";
 
 const STEPS: { id: Project["stage"]; label: string }[] = [
   { id: "download", label: "Get video" },
@@ -52,8 +53,6 @@ function Steps({ project }: { project: Project }) {
     </div>
   );
 }
-
-type Platform = "youtube" | "tiktok" | "instagram";
 
 /** Each platform's upload form, field by field, with the form's character limit. */
 const PLATFORMS: { id: Platform; label: string; fields: { key: string; label: string; limit: number; rows: number }[] }[] = [
@@ -149,7 +148,178 @@ function PostPanel({ post, platform }: { post: PostCopy; platform: Platform }) {
   );
 }
 
-function ClipCard({ projectId, clip, platform }: { projectId: string; clip: Clip; platform: Platform }) {
+const numOrNull = (text: string) => {
+  const t = text.replace(/[,\s]/g, "");
+  return t === "" ? null : Number(t);
+};
+
+/** Log how a posted clip did. New projects learn from these numbers. */
+function ResultsPanel({
+  projectId, clip, platform, editable, onSaved,
+}: { projectId: string; clip: Clip; platform: Platform; editable: boolean; onSaved: (p: Project) => void }) {
+  const s = clip.stats;
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState<Record<string, string>>({});
+  const [where, setWhere] = useState<Platform>(platform);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const start = () => {
+    const str = (n: number | null | undefined) => (n == null ? "" : String(n));
+    setForm({
+      views: str(s?.views), likes: str(s?.likes), comments: str(s?.comments),
+      shares: str(s?.shares), retention: str(s?.retention),
+    });
+    setWhere(s?.platform ?? platform);
+    setError(null);
+    setOpen(true);
+  };
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const values = Object.fromEntries(Object.entries(form).map(([k, v]) => [k, numOrNull(v)]));
+    if (values.views == null) return setError("Views are required.");
+    if (Object.values(values).some((v) => v != null && (Number.isNaN(v) || v < 0)))
+      return setError("Use positive numbers only.");
+    if (values.retention != null && values.retention > 100) return setError("Avg. % viewed must be 0–100.");
+    const whole = (v: number | null) => (v == null ? null : Math.round(v));
+    const stats: ClipStats = {
+      platform: where,
+      views: Math.round(values.views),
+      likes: whole(values.likes),
+      comments: whole(values.comments),
+      shares: whole(values.shares),
+      retention: values.retention,
+    };
+    setSaving(true);
+    try {
+      onSaved(await api.saveStats(projectId, clip.id, stats));
+      setOpen(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async () => {
+    setSaving(true);
+    try {
+      onSaved(await api.deleteStats(projectId, clip.id));
+      setOpen(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!open) {
+    if (!s)
+      return (
+        <button
+          type="button"
+          disabled={!editable}
+          onClick={start}
+          title="Posted this clip? Log its views so new projects learn what works for your audience."
+          className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted transition hover:border-muted hover:text-text disabled:opacity-40"
+        >
+          <BarChart3 className="size-3.5" /> Log results
+        </button>
+      );
+    const engaged = [s.likes, s.comments, s.shares].some((n) => n != null)
+      ? ((s.likes ?? 0) + (s.comments ?? 0) + (s.shares ?? 0)) / Math.max(s.views, 1)
+      : null;
+    return (
+      <button
+        type="button"
+        disabled={!editable}
+        onClick={start}
+        title="Edit results"
+        className="flex items-center gap-2 rounded-lg border border-ok/30 bg-ok/10 px-3 py-2 text-left text-xs text-ok transition hover:border-ok/60"
+      >
+        <BarChart3 className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 leading-relaxed">
+          <b className="font-semibold">{fmtCount(s.views)} views</b>
+          {engaged != null && <> · {(engaged * 100).toFixed(1)}% engaged</>}
+          {s.retention != null && <> · {Math.round(s.retention)}% viewed</>}
+        </span>
+        <PenLine className="size-3.5 shrink-0 opacity-70" />
+      </button>
+    );
+  }
+
+  const input = (key: string, label: string, placeholder = "") => (
+    <label className="space-y-1">
+      <span className="text-[11px] font-medium text-muted">{label}</span>
+      <input
+        inputMode="decimal"
+        value={form[key] ?? ""}
+        placeholder={placeholder}
+        onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+        className="w-full rounded-md border border-line bg-bg px-2 py-1.5 text-xs tabular-nums outline-none focus:border-accent/60"
+      />
+    </label>
+  );
+
+  return (
+    <form onSubmit={save} className="space-y-2.5 rounded-lg border border-line bg-bg/50 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold">How did it do?</span>
+        <select
+          value={where}
+          onChange={(e) => setWhere(e.target.value as Platform)}
+          aria-label="Platform"
+          className="rounded-md border border-line bg-bg px-1.5 py-1 text-[11px] outline-none"
+        >
+          {PLATFORMS.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {input("views", "Views *", "12400")}
+        {input("retention", "Avg. % viewed", "e.g. 62")}
+        {input("likes", "Likes")}
+        {input("comments", "Comments")}
+        {input("shares", "Shares")}
+      </div>
+      {error && <p className="text-[11px] text-danger">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          type="submit"
+          disabled={saving}
+          className="flex-1 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-accent-ink disabled:opacity-60"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+        {s && (
+          <button
+            type="button"
+            disabled={saving}
+            onClick={remove}
+            className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-danger"
+          >
+            Remove
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-text"
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ClipCard({
+  projectId, clip, platform, editable, onSaved,
+}: { projectId: string; clip: Clip; platform: Platform; editable: boolean; onSaved: (p: Project) => void }) {
   const [copied, setCopied] = useState(false);
   const ready = clip.status === "done" && clip.video;
 
@@ -182,6 +352,20 @@ function ClipCard({ projectId, clip, platform }: { projectId: string; clip: Clip
         <span className="absolute right-2 top-2 rounded-md bg-black/70 px-2 py-0.5 text-xs tabular-nums">
           {fmtTime(clip.duration)}
         </span>
+        {ready && (clip.framing === "face" || (clip.trimmed ?? 0) >= 0.5) && (
+          <div className="pointer-events-none absolute left-2 top-9 flex flex-col items-start gap-1">
+            {clip.framing === "face" && (
+              <span className="flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px]">
+                <ScanFace className="size-3" /> Speaker
+              </span>
+            )}
+            {(clip.trimmed ?? 0) >= 0.5 && (
+              <span className="flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] tabular-nums">
+                <Scissors className="size-3" /> −{clip.trimmed!.toFixed(1)}s
+              </span>
+            )}
+          </div>
+        )}
       </div>
       <div className="flex flex-1 flex-col gap-2 p-4">
         <h3 className="font-semibold leading-snug">{clip.title}</h3>
@@ -191,6 +375,7 @@ function ClipCard({ projectId, clip, platform }: { projectId: string; clip: Clip
           From {fmtTime(clip.start)} to {fmtTime(clip.end)}
         </p>
         {clip.post && <PostPanel post={clip.post} platform={platform} />}
+        {ready && <ResultsPanel projectId={projectId} clip={clip} platform={platform} editable={editable} onSaved={onSaved} />}
         <div className="mt-auto flex gap-2 pt-2">
           <a
             href={ready ? downloadUrl(projectId, clip.id, "mp4") : undefined}
@@ -302,6 +487,15 @@ export default function ProjectPage() {
               </span>
             )}
             {project.curation_mode === "heuristic" && <span>· Heuristic picks</span>}
+            {(project.learned_from ?? 0) > 0 && (
+              <Link
+                to="/insights"
+                className="inline-flex items-center gap-1 hover:text-text"
+                title="The AI used your logged results when picking these clips"
+              >
+                · <TrendingUp className="size-3.5 text-ok" /> Learned from {project.learned_from} clips
+              </Link>
+            )}
             <span className="max-w-full truncate">· {sourceLabel}</span>
           </div>
         </div>
@@ -331,6 +525,13 @@ export default function ProjectPage() {
         <div className="flex gap-2 rounded-xl border border-warn/30 bg-warn/10 px-4 py-3 text-sm text-warn">
           <TriangleAlert className="mt-0.5 size-4 shrink-0" />
           {project.posts_note}
+        </div>
+      )}
+
+      {project.render_note && (
+        <div className="flex gap-2 rounded-xl border border-warn/30 bg-warn/10 px-4 py-3 text-sm text-warn">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+          {project.render_note}
         </div>
       )}
 
@@ -401,7 +602,14 @@ export default function ProjectPage() {
       {project.clips.length > 0 && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {project.clips.map((c) => (
-            <ClipCard key={c.id} projectId={project.id} clip={c} platform={platform} />
+            <ClipCard
+              key={c.id}
+              projectId={project.id}
+              clip={c}
+              platform={platform}
+              editable={project.status === "done" || project.status === "error"}
+              onSaved={setProject}
+            />
           ))}
         </div>
       )}

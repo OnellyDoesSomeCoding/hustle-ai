@@ -5,8 +5,8 @@ A local AI clipper: paste a long video link (or upload a file) and get vertical 
 ## How it works
 
 ```
-link / file ──► yt-dlp ──► ffmpeg (audio) ──► faster-whisper (GPU) ──► local LLM via Ollama ──► ffmpeg + NVENC
-                download    16 kHz wav         words + timestamps        picks & scores clips      9:16 crop + captions
+link / file ──► yt-dlp ──► ffmpeg (audio) ──► faster-whisper (GPU) ──► local LLM via Ollama ──► YuNet faces ──► ffmpeg + NVENC
+                download    16 kHz wav         words + timestamps        picks & scores clips      speaker crop     jump cuts + 9:16 + captions
 ```
 
 | Part | Tech |
@@ -18,9 +18,12 @@ link / file ──► yt-dlp ──► ffmpeg (audio) ──► faster-whisper (
 | Clip picking | Ollama + `qwen2.5:7b` (falls back to an offline heuristic) |
 | Post copy | Ollama writes a title, caption, description and hashtags per clip, formatted for YouTube Shorts, TikTok and Instagram Reels with one-click copy (falls back to copy built from the transcript) |
 | Captions | Generated ASS subtitles (Karaoke, Bold Pop, Clean Box), burned in by libass |
+| Jump cuts | Pauses and filler sounds (um, uh…) are cut using the word timestamps; captions are re-timed to match. *Natural* cuts pauses over ~0.6 s, *Fast* over ~0.3 s |
+| Framing | OpenCV YuNet face detection (CPU, model downloads on first use to `data/models/`). Faces become tracks, mouth movement picks the speaker, and the crop holds still in steady shots that switch on the source's own camera cuts. Groups that fit in the frame are shown together |
+| Learning | Log each posted clip's views/likes/comments/shares/% viewed. Once 4 clips have results, curation shows the LLM your best and worst clips as examples. The **Insights** page ranks clips and shows how well the AI score predicted real results |
 | Render | ffmpeg, `h264_nvenc` (falls back to libx264), 1080×1920 |
 
-Projects are stored in `data/projects/<id>/`: the source video, `transcript.json`, `curation.json`, `posts.json` and `clips/<clip>/clip.mp4`. Each step saves its result, so **Retry** and server restarts pick up where they stopped.
+Projects are stored in `data/projects/<id>/`: the source video, `transcript.json`, `curation.json`, `posts.json`, `stats.json` (logged results) and `clips/<clip>/clip.mp4`. Each step saves its result, so **Retry** and server restarts pick up where they stopped.
 
 ## Requirements
 
@@ -55,7 +58,7 @@ The first transcription downloads the Whisper model (~1.6 GB) into the Hugging F
 ## Roadmap
 
 - **Phase 1 (done):** link/upload → transcribe → AI picks → centre crop → captions → MP4/SRT export
-- **Phase 2:** face tracking, fit/blur/square layouts, more caption templates, CTA
+- **Phase 2:** ~~face tracking~~ (done: speaker-following crop), ~~silence/filler cuts~~ (done), ~~learning from results~~ (done), fit/blur/square layouts, more caption templates, CTA, pull stats from the YouTube API
 - **Phase 3:** editor (trim, transcript editing, per-clip re-render)
 - **Phase 4:** music + ducking, gameplay split-screen, translation, hashtags
 - **Phase 5:** channel watcher (YouTube RSS), batch queue

@@ -2,7 +2,7 @@ import { ChevronDown, Film, Link2, Loader2, Upload, Wand2, X } from "lucide-reac
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, parseTime } from "../api";
-import type { ClipLength, Options } from "../types";
+import type { ClipLength, Options, Pace } from "../types";
 import { Field, inputClass, ProgressBar, Segmented } from "./ui";
 
 const LENGTHS: { value: ClipLength; label: string }[] = [
@@ -13,6 +13,22 @@ const LENGTHS: { value: ClipLength; label: string }[] = [
 ];
 
 const COUNTS = [0, 3, 5, 8, 10, 12, 15, 20];
+
+const PACES: { value: Pace; label: string }[] = [
+  { value: "off", label: "Off" },
+  { value: "natural", label: "Natural" },
+  { value: "fast", label: "Fast" },
+];
+const PACE_HINT: Record<Pace, string> = {
+  off: "keeps every pause",
+  natural: "cuts pauses over 0.6s and ums",
+  fast: "cuts pauses over 0.3s and ums",
+};
+
+const FRAMINGS: { value: Options["reframe"]; label: string }[] = [
+  { value: "face", label: "Follow speaker" },
+  { value: "center", label: "Centre" },
+];
 
 const LANGUAGES: [string, string][] = [
   ["auto", "Auto-detect"], ["en", "English"], ["es", "Spanish"], ["pt", "Portuguese"], ["fr", "French"],
@@ -47,6 +63,8 @@ export default function NewProjectForm({ onCreated }: { onCreated?: () => void }
   const [language, setLanguage] = useState("auto");
   const [template, setTemplate] = useState("karaoke");
   const [hookTitle, setHookTitle] = useState(true);
+  const [pace, setPace] = useState<Pace>("natural");
+  const [reframe, setReframe] = useState<Options["reframe"]>("face");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [startText, setStartText] = useState("");
   const [endText, setEndText] = useState("");
@@ -77,6 +95,8 @@ export default function NewProjectForm({ onCreated }: { onCreated?: () => void }
       language: language === "auto" ? null : language,
       caption_template: template,
       hook_title: hookTitle,
+      pace,
+      reframe,
       start,
       end,
     };
@@ -224,6 +244,15 @@ export default function NewProjectForm({ onCreated }: { onCreated?: () => void }
               </button>
             ))}
           </div>
+        </Field>
+      </div>
+
+      <div className="mt-5 grid gap-5 md:grid-cols-2">
+        <Field label="Jump cuts" hint={PACE_HINT[pace]}>
+          <Segmented value={pace} options={PACES} onChange={setPace} />
+        </Field>
+        <Field label="Framing" hint={reframe === "face" ? "crops to whoever is talking" : "fixed centre crop"}>
+          <Segmented value={reframe} options={FRAMINGS} onChange={setReframe} />
         </Field>
       </div>
 

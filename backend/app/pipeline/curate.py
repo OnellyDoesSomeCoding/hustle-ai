@@ -167,7 +167,7 @@ def _windows(units: list[dict]) -> list[tuple[int, int]]:
     return windows
 
 
-def _ask_llm(lines: str, wanted: int, lo: float, hi: float) -> list[dict]:
+def _ask_llm(lines: str, wanted: int, lo: float, hi: float, learned: str | None = None) -> list[dict]:
     user = (
         f"Find the {wanted} best clips. Each clip must be between {int(lo)} and {int(hi)} seconds long "
         f"(use the mm:ss timestamps to judge length).\n\nTranscript:\n{lines}"
@@ -176,7 +176,8 @@ def _ask_llm(lines: str, wanted: int, lo: float, hi: float) -> list[dict]:
         f"{OLLAMA_URL}/api/chat",
         json={
             "model": OLLAMA_MODEL,
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}],
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT + ("\n\n" + learned if learned else "")},
+                         {"role": "user", "content": user}],
             "stream": False,
             "format": SCHEMA,
             "options": {"temperature": 0.3, "num_ctx": 8192},
@@ -196,7 +197,9 @@ def unload_llm() -> None:
         pass
 
 
-def curate_llm(units: list[dict], count: int, lo: float, hi: float, on_progress: Callable[[float, str], None]) -> list[dict]:
+def curate_llm(units: list[dict], count: int, lo: float, hi: float, on_progress: Callable[[float, str], None],
+               learned: str | None = None) -> list[dict]:
+    """`learned` = examples of the creator's past clips and how they performed (see learning.py)."""
     windows = _windows(units)
     total_span = max(units[-1]["end"] - units[0]["start"], 1)
     cands: list[dict] = []
@@ -207,7 +210,7 @@ def curate_llm(units: list[dict], count: int, lo: float, hi: float, on_progress:
         wanted = max(3, math.ceil(count * span / total_span) + 2)
         lines = "\n".join(f"[{i}] {_fmt(units[i]['start'])} {units[i]['text']}" for i in range(a, b + 1))
         try:
-            raw = _ask_llm(lines, wanted, lo, hi)
+            raw = _ask_llm(lines, wanted, lo, hi, learned)
         except Exception as exc:
             print(f"[curate] LLM window {n} failed: {exc}")
             errors += 1
@@ -274,7 +277,7 @@ def curate_heuristic(units: list[dict], count: int, lo: float, hi: float) -> lis
 
 
 def curate(segments: list[dict], length_key: str, max_clips: int,
-           on_progress: Callable[[float, str], None]) -> tuple[list[dict], str, str | None]:
+           on_progress: Callable[[float, str], None], learned: str | None = None) -> tuple[list[dict], str, str | None]:
     """Returns (clips, mode, note). mode is "llm" or "heuristic"."""
     units = build_units(segments)
     if not units:
@@ -289,7 +292,7 @@ def curate(segments: list[dict], length_key: str, max_clips: int,
     note = None
     if status["running"] and status["model_ready"]:
         try:
-            return curate_llm(units, count, lo, hi, on_progress), "llm", None
+            return curate_llm(units, count, lo, hi, on_progress, learned), "llm", None
         except Exception as exc:
             note = f"AI curation failed ({exc}); used the offline heuristic instead."
     elif status["running"]:

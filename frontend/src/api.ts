@@ -1,4 +1,4 @@
-import type { Options, Project, SystemInfo } from "./types";
+import type { ClipStats, Insights, Options, Project, SystemInfo } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
@@ -23,6 +23,15 @@ export const api = {
   retry: (id: string, full = false) =>
     request<Project>(`/api/projects/${id}/retry?full=${full}`, { method: "POST" }),
   rewritePosts: (id: string) => request<Project>(`/api/projects/${id}/posts`, { method: "POST" }),
+  saveStats: (id: string, clipId: string, stats: ClipStats) =>
+    request<Project>(`/api/projects/${id}/clips/${clipId}/stats`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(stats),
+    }),
+  deleteStats: (id: string, clipId: string) =>
+    request<Project>(`/api/projects/${id}/clips/${clipId}/stats`, { method: "DELETE" }),
+  insights: () => request<Insights>("/api/insights"),
 
   /** Uses XHR so large uploads can report progress. */
   create(source: { url?: string; file?: File }, options: Options, onUpload?: (pct: number) => void) {
@@ -70,4 +79,11 @@ export function parseTime(text: string): number | null {
   const parts = t.split(":").map(Number);
   if (parts.some((n) => Number.isNaN(n) || n < 0) || parts.length > 3) return NaN;
   return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+/** 1234 -> "1,234", 48200 -> "48.2K", 1500000 -> "1.5M". */
+export function fmtCount(n: number): string {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 1e4) return `${(n / 1e3).toFixed(1).replace(/\.0$/, "")}K`;
+  return n.toLocaleString();
 }

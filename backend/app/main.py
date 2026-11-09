@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from . import jobs
+from . import jobs, learning
 from .config import FRONTEND_DIST, OLLAMA_MODEL, PROJECTS_DIR, WHISPER_MODEL, ffmpeg_path
 from .pipeline import captions, curate, ingest, media, transcribe
 from .store import store
@@ -26,6 +26,8 @@ class Options(BaseModel):
     language: Optional[str] = None  # None = auto-detect
     caption_template: str = "karaoke"
     hook_title: bool = True
+    pace: Literal["off", "natural", "fast"] = "natural"  # jump cuts: remove pauses and filler words
+    reframe: Literal["face", "center"] = "face"  # face-tracked or centred 9:16 crop
     start: Optional[float] = Field(None, ge=0)
     end: Optional[float] = Field(None, ge=0)
 
@@ -41,6 +43,16 @@ class Options(BaseModel):
     def _language(cls, v: Optional[str]) -> Optional[str]:
         v = (v or "").strip().lower()
         return v if v and v != "auto" else None
+
+
+class Stats(BaseModel):
+    """Results of a posted clip, typed in from the platform's analytics."""
+    platform: Optional[Literal["youtube", "tiktok", "instagram"]] = None
+    views: int = Field(ge=0)
+    likes: Optional[int] = Field(None, ge=0)
+    comments: Optional[int] = Field(None, ge=0)
+    shares: Optional[int] = Field(None, ge=0)
+    retention: Optional[float] = Field(None, ge=0, le=100)  # average % of the clip viewed
 
 
 @asynccontextmanager
@@ -163,6 +175,49 @@ def download_clip(project_id: str, clip_id: str, kind: Literal["mp4", "srt"] = "
     rel = clip["video"] if kind == "mp4" else clip["srt"]
     safe_title = re.sub(r"[^\w\- ]+", "", clip["title"]).strip()[:60] or clip_id
     return FileResponse(store.dir(project_id) / rel, filename=f"{safe_title}.{kind}")
+
+
+# ---- results & learning ------------------------------------------------------------
+
+def _done_clip(project: dict, clip_id: str) -> dict:
+    if project["status"] in ("queued", "processing"):
+        raise HTTPException(409, "Wait until the project has finished processing.")
+    clip = next((c for c in project["clips"] if c["id"] == clip_id), None)
+    if clip is None or clip["status"] != "done":
+        raise HTTPException(404, "Clip not found")
+    return clip
+
+
+@app.put("/api/projects/{project_id}/clips/{clip_id}/stats")
+def save_stats(project_id: str, clip_id: str, stats: Stats) -> dict:
+    project = _get(project_id)
+    clip = _done_clip(project, clip_id)
+    clip["stats"] = learning.public(learning.save(project_id, clip, stats.model_dump()))
+    return store.update(project_id, clips=project["clips"])
+
+
+@app.delete("/api/projects/{project_id}/clips/{clip_id}/stats")
+def delete_stats(project_id: str, clip_id: str) -> dict:
+    project = _get(project_id)
+    clip = _done_clip(project, clip_id)
+    learning.remove(project_id, clip_id)
+    clip["stats"] = None
+    return store.update(project_id, clips=project["clips"])
+
+
+@app.get("/api/insights")
+def insights() -> dict:
+    rows = sorted(learning.all_logged(), key=lambda r: r["perf"], reverse=True)
+    for r in rows:
+        r["engagement"] = learning.engagement(r)
+        r.pop("text", None)
+    return {
+        "logged": len(rows),
+        "min_needed": learning.MIN_LOGGED,
+        "learning": len(rows) >= learning.MIN_LOGGED,
+        "accuracy": learning.spearman([r["score"] for r in rows], [r["perf"] for r in rows]),
+        "clips": rows,
+    }
 
 
 # ---- static files ----------------------------------------------------------------

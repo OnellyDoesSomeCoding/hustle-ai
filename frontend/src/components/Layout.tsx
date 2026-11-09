@@ -1,5 +1,5 @@
-import { Cpu, Sparkles, TriangleAlert, Zap } from "lucide-react";
-import { Link, Outlet } from "react-router-dom";
+import { Cpu, Sparkles, TrendingUp, TriangleAlert, Zap } from "lucide-react";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import { useSystem } from "../hooks";
 
 function Chip({ ok, icon, label, title }: { ok: boolean; icon: React.ReactNode; label: string; title: string }) {
@@ -28,6 +28,16 @@ export default function Layout() {
             <img src="/favicon.svg" alt="" className="size-7" />
             HustleAI
           </Link>
+          <NavLink
+            to="/insights"
+            className={({ isActive }) =>
+              `mr-auto flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm transition ${
+                isActive ? "bg-panel-2 text-text" : "text-muted hover:text-text"
+              }`
+            }
+          >
+            <TrendingUp className="size-4" /> Insights
+          </NavLink>
           {system && (
             <div className="flex items-center gap-2">
               <Chip

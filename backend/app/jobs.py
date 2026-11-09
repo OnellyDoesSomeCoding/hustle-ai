@@ -16,7 +16,8 @@ import traceback
 from pathlib import Path
 from typing import Callable
 
-from .pipeline import captions, curate, ingest, media, posts, transcribe
+from . import learning
+from .pipeline import captions, curate, edit, ingest, media, posts, reframe, transcribe
 from .store import store
 
 # Overall progress range for each stage.
@@ -70,7 +71,7 @@ def _run(project_id: str) -> None:
     folder = store.dir(project_id)
     folder.mkdir(parents=True, exist_ok=True)
     opts = project["options"]
-    store.update(project_id, status="processing", error=None)
+    store.update(project_id, status="processing", error=None, render_note=None)
 
     # 1. Source video ----------------------------------------------------------
     report = _reporter(project_id, "download")
@@ -115,12 +116,15 @@ def _run(project_id: str) -> None:
         cur = json.loads(curation_path.read_text(encoding="utf-8"))
     else:
         report(0.0, "Finding the best moments…")
-        picked, mode, note = curate.curate(segments, opts.get("length", "under60"), int(opts.get("max_clips") or 0), report)
-        cur = {"clips": picked, "mode": mode, "note": note}
+        learned, learned_from = learning.examples(exclude=project_id)
+        picked, mode, note = curate.curate(segments, opts.get("length", "under60"), int(opts.get("max_clips") or 0),
+                                           report, learned)
+        cur = {"clips": picked, "mode": mode, "note": note, "learned_from": learned_from if mode == "llm" else 0}
         curation_path.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
     if not cur["clips"]:
         raise RuntimeError(cur.get("note") or "No clips could be found in this video.")
 
+    stats = learning.load(project_id)
     clips = []
     for i, c in enumerate(sorted(cur["clips"], key=lambda c: c["score"], reverse=True)):
         clips.append({
@@ -130,8 +134,10 @@ def _run(project_id: str) -> None:
             "title": c["title"], "hook": c.get("hook", ""), "reason": c.get("reason", ""),
             "score": c["score"], "status": "pending",
             "video": None, "thumb": None, "srt": None, "post": None,
+            "stats": learning.public(stats.get(f"c{i + 1:02d}")),
         })
-    store.update(project_id, clips=clips, curation_mode=cur["mode"], note=cur.get("note"))
+    store.update(project_id, clips=clips, curation_mode=cur["mode"], note=cur.get("note"),
+                 learned_from=cur.get("learned_from", 0))
 
     # 4. Post copy (titles, descriptions, hashtags) ----------------------------------------
     report = _reporter(project_id, "posts")
@@ -154,12 +160,23 @@ def _run(project_id: str) -> None:
     # 5. Render ------------------------------------------------------------------------
     report = _reporter(project_id, "render")
     template = opts.get("caption_template", "karaoke")
+    pace = opts.get("pace", "natural")
+    track_faces = opts.get("reframe", "face") == "face" and reframe.needs_tracking(info)
+    render_note = None
     for i, clip in enumerate(clips):
-        report(i / len(clips), f"Rendering clip {i + 1} of {len(clips)} ({media.encoder_name()})…")
+        label = f"clip {i + 1} of {len(clips)}"
         clip_dir = folder / "clips" / clip["id"]
         clip_dir.mkdir(parents=True, exist_ok=True)
         rel = f"clips/{clip['id']}"
-        words = captions.clip_words(segments, clip["start"], clip["end"])
+        src_dur = clip["end"] - clip["start"]
+
+        # Jump cuts: the captions are re-timed onto the shortened clip.
+        all_words = captions.clip_words(segments, clip["start"], clip["end"])
+        keep = edit.plan_keep(all_words, src_dur, pace, info["fps"])
+        timeline = edit.Timeline(keep)
+        words = timeline.remap_words(all_words, drop_fillers=pace in edit.PACES)
+        clip.update(duration=round(timeline.duration, 2), trimmed=round(src_dur - timeline.duration, 2))
+
         (clip_dir / "captions.srt").write_text(captions.build_srt(words), encoding="utf-8")
         ass_name = None
         hook = clip["hook"] if opts.get("hook_title", True) else None
@@ -168,10 +185,26 @@ def _run(project_id: str) -> None:
             (clip_dir / "captions.ass").write_text(
                 captions.build_ass(ass_words, clip["duration"], template, hook), encoding="utf-8")
             ass_name = "captions.ass"
+
+        meta_path = clip_dir / "render.json"
         if not (clip_dir / "clip.mp4").exists():
-            media.render_clip(source, clip_dir, clip["start"], clip["end"], info, ass_name)
+            center_x = None
+            if track_faces and render_note is None:
+                report(i / len(clips), f"Finding faces in {label}…")
+                try:
+                    center_x = reframe.plan(source, clip["start"], src_dur, info, timeline)
+                except reframe.ReframeUnavailable as exc:
+                    render_note = f"{exc} Clips use a centre crop instead."
+                    store.update(project_id, render_note=render_note)
+                except Exception:  # never lose a clip over framing
+                    traceback.print_exc()
+            report((i + 0.5) / len(clips), f"Rendering {label} ({media.encoder_name()})…")
+            media.render_clip(source, clip_dir, clip["start"], clip["end"], info, ass_name, keep, center_x)
+            meta_path.write_text(json.dumps({"framing": "face" if center_x else "center"}), encoding="utf-8")
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
         media.thumbnail(clip_dir / "clip.mp4", clip_dir / "thumb.jpg", min(1.5, clip["duration"] / 2))
-        clip.update(status="done", video=f"{rel}/clip.mp4", thumb=f"{rel}/thumb.jpg", srt=f"{rel}/captions.srt")
+        clip.update(status="done", video=f"{rel}/clip.mp4", thumb=f"{rel}/thumb.jpg", srt=f"{rel}/captions.srt",
+                    framing=meta.get("framing", "center"))
         store.update(project_id, clips=clips)
 
     store.update(project_id, status="done", stage="done", progress=1.0,
@@ -210,6 +243,7 @@ def reset_for_retry(project_id: str, full: bool) -> None:
     if full:
         for name in ("transcript.json", "curation.json", "posts.json"):
             (folder / name).unlink(missing_ok=True)
+        learning.clear(project_id)  # new picks: old results no longer belong to these clip ids
     store.update(project_id, status="queued", stage="queued", progress=0.0, error=None,
                  message="Waiting in queue", clips=[])
 
