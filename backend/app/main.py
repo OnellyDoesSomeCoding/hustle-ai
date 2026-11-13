@@ -59,6 +59,7 @@ class Stats(BaseModel):
 class CountdownItem(BaseModel):
     id: str
     title: str = Field("", max_length=100)  # the list label; empty = the clip's title
+    clip_max: Optional[float] = Field(None, ge=5, le=600)  # seconds of this clip; None = the full clip
 
 
 class Countdown(BaseModel):
@@ -67,7 +68,8 @@ class Countdown(BaseModel):
     items: list[CountdownItem] = Field(min_length=2, max_length=10)
     title: str = Field("", max_length=80)
     reveal: Optional[list[int]] = None
-    clip_max: Optional[float] = Field(None, ge=5, le=120)  # seconds per clip; None = full clips
+    # Older clients send one length for every clip; an item's own `clip_max` wins.
+    clip_max: Optional[float] = Field(None, ge=5, le=600)
 
 
 def _countdown_busy(project: dict) -> bool:
@@ -264,8 +266,10 @@ def make_countdown(project_id: str, body: Countdown) -> dict:
     title = body.title.strip() or f"Top {len(ids)} moments"
     store.update(project_id, countdown={
         "status": "queued", "progress": 0.0, "message": "Waiting in queue", "error": None,
-        "items": [{"id": i.id, "title": i.title.strip()} for i in body.items], "title": title,
-        "reveal": reveal, "clip_max": body.clip_max, "video": None, "duration": None,
+        "items": [{"id": i.id, "title": i.title.strip(),
+                   "clip_max": i.clip_max if "clip_max" in i.model_fields_set else body.clip_max}
+                  for i in body.items],
+        "title": title, "reveal": reveal, "video": None, "duration": None,
     })
     jobs.enqueue_countdown(project_id)
     return _get(project_id)

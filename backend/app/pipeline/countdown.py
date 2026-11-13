@@ -100,10 +100,10 @@ def build_ass(title: str, labels: dict[int, str], segments: list[tuple[float, fl
 
 
 def render(items: list[dict], title: str, fps: float, out_dir: Path,
-           on_progress: Callable[[float, str], None], clip_max: float | None = None) -> tuple[Path, float]:
-    """`items` = [{"video": Path, "duration": s, "rank": n, "label": str}] in playback
-    order (the reveal order). `clip_max` cuts each clip to its first N seconds (the hook
-    is at the start). Returns (video path, duration)."""
+           on_progress: Callable[[float, str], None]) -> tuple[Path, float]:
+    """`items` = [{"video": Path, "duration": s, "rank": n, "label": str, "clip_max": s|None}]
+    in playback order (the reveal order). An item's `clip_max` cuts that clip to its first
+    N seconds (the hook is at the start); None plays it in full. Returns (video path, duration)."""
     ffmpeg = ffmpeg_path()
     if not ffmpeg:
         raise MediaError("ffmpeg not found.")
@@ -111,7 +111,7 @@ def render(items: list[dict], title: str, fps: float, out_dir: Path,
 
     parts, lengths = [], []
     for i, item in enumerate(items):
-        dur = item["duration"]
+        dur, clip_max = item["duration"], item.get("clip_max")
         cut = clip_max is not None and dur > clip_max + 0.5
         if cut:
             dur = float(clip_max)

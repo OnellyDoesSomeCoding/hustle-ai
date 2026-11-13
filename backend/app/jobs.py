@@ -265,7 +265,9 @@ def _run_countdown(project_id: str) -> None:
         if clip is None or not clip.get("video") or not (folder / clip["video"]).exists():
             raise RuntimeError("A clip in the top list is missing. Re-render the project, then try again.")
         by_rank[n + 1] = {"video": folder / clip["video"], "duration": clip["duration"], "rank": n + 1,
-                          "label": entry["title"] or clip["title"]}
+                          "label": entry["title"] or clip["title"],
+                          # Jobs saved before per-clip lengths had one length for every clip.
+                          "clip_max": entry.get("clip_max", job.get("clip_max"))}
     reveal = job.get("reveal")
     if sorted(reveal or []) != sorted(by_rank):
         reveal = countdown.shuffled_order(len(by_rank))
@@ -281,7 +283,7 @@ def _run_countdown(project_id: str) -> None:
             _set_countdown(project_id, progress=round(pct, 3), message=message)
 
     _, duration = countdown.render(items, job["title"], (project.get("media") or {}).get("fps", 30.0),
-                                   folder / "countdown", report, job.get("clip_max"))
+                                   folder / "countdown", report)
     _set_countdown(project_id, status="done", progress=1.0, message="Ready", video="countdown/countdown.mp4",
                    duration=round(duration, 2), rendered_at=time.time())
 

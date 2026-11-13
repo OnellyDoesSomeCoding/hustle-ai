@@ -7,16 +7,24 @@ import type { Clip, Project } from "../types";
 import { inputClass, ProgressBar } from "./ui";
 
 const SIZES = [3, 5, 10];
+/** Quick picks that set every clip's length at once. */
 const LENGTHS: { value: number | null; label: string }[] = [
   { value: null, label: "Full" },
   { value: 30, label: "30s" },
   { value: 15, label: "15s" },
   { value: 10, label: "10s" },
 ];
+const MIN_LEN = 10; // shortest a clip can be cut to, in seconds
 const SHORTS_MAX = 180; // YouTube Shorts limit, in seconds
 const LABEL_MAX = 26; // the renderer cuts labels longer than this
 
-type Item = { id: string; title: string };
+/** `clipMax` = seconds of the clip to play from its start; null = the full clip. */
+type Item = { id: string; title: string; clipMax: number | null };
+
+/** Seconds of a clip that play: the full clip unless it's cut shorter (cuts under 0.5s are skipped, as the renderer does). */
+function playedLength(duration: number, clipMax: number | null): number {
+  return clipMax != null && duration > clipMax + 0.5 ? clipMax : duration;
+}
 
 /** A short list label: the AI hook if there is one, else the title, cut at a word. */
 function defaultLabel(clip: Clip): string {
@@ -55,7 +63,6 @@ export default function CountdownPanel({
   const [items, setItems] = useState<Item[]>([]);
   const [title, setTitle] = useState("");
   const [reveal, setReveal] = useState<number[]>([]);
-  const [clipMax, setClipMax] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,31 +74,50 @@ export default function CountdownPanel({
   if (ready.length < 2) return null;
   const running = job?.status === "queued" || job?.status === "processing";
 
-  const pickTop = (n: number) => setItems(best.slice(0, n).map((c) => ({ id: c.id, title: defaultLabel(c) })));
+  const pickTop = (n: number) =>
+    setItems(best.slice(0, n).map((c) => ({ id: c.id, title: defaultLabel(c), clipMax: null })));
   const open = () => {
     if (job?.items?.length) {
       const kept = job.items.filter((i) => byId[i.id]);
-      setItems(kept.map((i) => ({ id: i.id, title: i.title || defaultLabel(byId[i.id]) })));
+      setItems(
+        kept.map((i) => ({
+          id: i.id,
+          title: i.title || defaultLabel(byId[i.id]),
+          // Jobs saved before per-clip lengths had one length for every clip.
+          clipMax: i.clip_max !== undefined ? i.clip_max : (job.clip_max ?? null),
+        })),
+      );
       setTitle(job.title);
       setReveal(job.reveal?.length === kept.length ? job.reveal : shuffled(kept.length));
-      setClipMax(job.clip_max ?? null);
     } else {
       pickTop(Math.min(5, ready.length));
       setTitle("");
-      setClipMax(null);
     }
     setError(null);
     setEditing(true);
   };
-  const move = (i: number, d: -1 | 1) =>
+  /** Moves the clip at rank i+1 to rank j+1; the clips in between shift by one. */
+  const moveTo = (i: number, j: number) =>
     setItems((list) => {
       const next = [...list];
-      [next[i], next[i + d]] = [next[i + d], next[i]];
+      next.splice(j, 0, ...next.splice(i, 1));
+      return next;
+    });
+  const patch = (i: number, fields: Partial<Item>) =>
+    setItems((list) => list.map((x, k) => (k === i ? { ...x, ...fields } : x)));
+  const setAllLengths = (clipMax: number | null) => setItems((list) => list.map((x) => ({ ...x, clipMax })));
+  /** Puts `rank` at play position n; the rank that was there takes its old position. */
+  const setRevealAt = (n: number, rank: number) =>
+    setReveal((order) => {
+      const next = [...order];
+      const from = next.indexOf(rank);
+      [next[n], next[from]] = [next[from], next[n]];
       return next;
     });
   const unused = best.filter((c) => !items.some((i) => i.id === c.id));
-  const lengthOf = (c: Clip | undefined) => Math.min(c?.duration ?? 0, clipMax ?? Infinity);
-  const total = items.reduce((s, i) => s + lengthOf(byId[i.id]), 0);
+  const total = items.reduce((s, i) => s + playedLength(byId[i.id]?.duration ?? 0, i.clipMax), 0);
+  const cut = items.filter((i) => playedLength(byId[i.id]?.duration ?? 0, i.clipMax) < (byId[i.id]?.duration ?? 0));
+  const sameLength = items.length > 0 && items.every((i) => i.clipMax === items[0].clipMax) ? items[0].clipMax : undefined;
 
   const render = async () => {
     setBusy(true);
@@ -99,10 +125,9 @@ export default function CountdownPanel({
     try {
       onChange(
         await api.makeCountdown(project.id, {
-          items: items.map((i) => ({ id: i.id, title: i.title.trim() })),
+          items: items.map((i) => ({ id: i.id, title: i.title.trim(), clip_max: i.clipMax })),
           title: title.trim(),
           reveal: reveal.length === items.length ? reveal : shuffled(items.length),
-          clip_max: clipMax,
         }),
       );
       setEditing(false);
@@ -160,13 +185,28 @@ export default function CountdownPanel({
           />
         </label>
         <div className="space-y-1">
-          <span className="text-xs font-medium text-muted">Ranking: the label shows in the list as each clip plays</span>
+          <span className="text-xs font-medium text-muted">
+            Ranking: pick a clip's rank or use the arrows. The label shows in the list as each clip plays, and the
+            slider sets how much of the clip plays.
+          </span>
           <ol className="space-y-2">
             {items.map((item, i) => {
               const clip = byId[item.id] as Clip;
               return (
                 <li key={item.id} className="flex items-center gap-3 rounded-xl border border-line bg-bg/50 p-2">
-                  <span className="w-8 shrink-0 text-center text-lg font-black text-accent">{i + 1}.</span>
+                  <select
+                    value={i}
+                    onChange={(e) => moveTo(i, Number(e.target.value))}
+                    title="Rank"
+                    aria-label={`Rank of ${item.title || clip.title}`}
+                    className="w-12 shrink-0 cursor-pointer appearance-none rounded-md bg-transparent py-1 text-center text-lg font-black text-accent outline-none hover:bg-panel-2 focus:bg-panel-2"
+                  >
+                    {items.map((_, r) => (
+                      <option key={r} value={r} className="bg-panel text-base text-text">
+                        {r + 1}.
+                      </option>
+                    ))}
+                  </select>
                   <div className="flex h-12 w-7 shrink-0 items-center justify-center overflow-hidden rounded bg-panel-2">
                     {clip.thumb ? (
                       <img src={mediaUrl(project.id, clip.thumb)} alt="" className="h-full w-full object-cover" />
@@ -179,20 +219,24 @@ export default function CountdownPanel({
                       value={item.title}
                       maxLength={LABEL_MAX}
                       aria-label={`List label for #${i + 1}`}
-                      onChange={(e) =>
-                        setItems((list) => list.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)))
-                      }
+                      onChange={(e) => patch(i, { title: e.target.value })}
                       className="w-full rounded-md border border-line bg-bg px-2 py-1.5 text-sm outline-none focus:border-accent/60"
                     />
                     <div className="truncate text-[11px] text-muted" title={clip.title}>
                       Score {clip.score} · {fmtTime(clip.duration)} · {clip.title}
                     </div>
+                    <LengthSlider
+                      duration={clip.duration}
+                      value={item.clipMax}
+                      label={`Length of #${i + 1}`}
+                      onChange={(clipMax) => patch(i, { clipMax })}
+                    />
                   </div>
                   <div className="flex shrink-0 gap-1">
-                    <IconBtn label="Move up" disabled={i === 0} onClick={() => move(i, -1)}>
+                    <IconBtn label="Move up" disabled={i === 0} onClick={() => moveTo(i, i - 1)}>
                       <ArrowUp className="size-3.5" />
                     </IconBtn>
-                    <IconBtn label="Move down" disabled={i === items.length - 1} onClick={() => move(i, 1)}>
+                    <IconBtn label="Move down" disabled={i === items.length - 1} onClick={() => moveTo(i, i + 1)}>
                       <ArrowDown className="size-3.5" />
                     </IconBtn>
                     <IconBtn label="Remove" onClick={() => setItems((list) => list.filter((_, j) => j !== i))}>
@@ -211,7 +255,7 @@ export default function CountdownPanel({
               value=""
               onChange={(e) => {
                 const clip = byId[e.target.value];
-                if (clip) setItems((list) => [...list, { id: clip.id, title: defaultLabel(clip) }]);
+                if (clip) setItems((list) => [...list, { id: clip.id, title: defaultLabel(clip), clipMax: null }]);
               }}
               aria-label="Add a clip"
               className="min-w-0 flex-1 rounded-md border border-line bg-bg px-2 py-1.5 text-sm text-muted outline-none"
@@ -228,11 +272,24 @@ export default function CountdownPanel({
         <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
             Reveal order
-            <span className="flex flex-wrap gap-1">
+            <span className="flex flex-wrap items-center gap-1">
               {reveal.length === items.length &&
                 reveal.map((r, n) => (
-                  <span key={n} className="rounded-md bg-panel-2 px-1.5 py-0.5 font-semibold tabular-nums text-text">
-                    #{r}
+                  <span key={n} className="flex items-center gap-1">
+                    {n > 0 && <span aria-hidden>→</span>}
+                    <select
+                      value={r}
+                      onChange={(e) => setRevealAt(n, Number(e.target.value))}
+                      title={`Rank shown ${n === 0 ? "first" : `in place ${n + 1}`}`}
+                      aria-label={`Rank shown in place ${n + 1}`}
+                      className="cursor-pointer appearance-none rounded-md bg-panel-2 px-1.5 py-0.5 text-center font-semibold tabular-nums text-text outline-none hover:bg-line focus:ring-1 focus:ring-accent/60"
+                    >
+                      {items.map((_, k) => (
+                        <option key={k} value={k + 1} className="bg-panel">
+                          #{k + 1}
+                        </option>
+                      ))}
+                    </select>
                   </span>
                 ))}
             </span>
@@ -246,15 +303,15 @@ export default function CountdownPanel({
             </button>
           </div>
           <div className="flex items-center gap-2 text-xs text-muted">
-            Per clip
+            Set all clips to
             <div className="flex overflow-hidden rounded-md border border-line">
               {LENGTHS.map((l) => (
                 <button
                   key={l.label}
                   type="button"
-                  onClick={() => setClipMax(l.value)}
+                  onClick={() => setAllLengths(l.value)}
                   className={`px-2 py-1 font-medium ${
-                    clipMax === l.value ? "bg-accent text-accent-ink" : "text-text hover:bg-panel-2"
+                    sameLength === l.value ? "bg-accent text-accent-ink" : "text-text hover:bg-panel-2"
                   }`}
                 >
                   {l.label}
@@ -265,7 +322,8 @@ export default function CountdownPanel({
         </div>
         <p className="text-xs text-muted">
           The clips play back to back. The title stays at the top, and the numbered list on the left fills in as each
-          clip plays. About {fmtTime(total)} long{clipMax ? `, each clip cut to its first ${clipMax}s` : ""}.
+          clip plays. About {fmtTime(total)} long
+          {cut.length ? `, with ${cut.length === items.length ? "every clip" : `${cut.length} of ${items.length} clips`} cut short (each keeps its start)` : ""}.
         </p>
         {total > SHORTS_MAX && (
           <p className="flex items-center gap-1.5 text-xs text-warn">
@@ -341,11 +399,16 @@ export default function CountdownPanel({
             </span>
           </p>
           <ol className="space-y-0.5 text-xs text-muted">
-            {job.items.map((i, n) => (
-              <li key={i.id} className="truncate">
-                <b className="text-text">{n + 1}.</b> {i.title || byId[i.id]?.title}
-              </li>
-            ))}
+            {job.items.map((i, n) => {
+              const dur = byId[i.id]?.duration ?? 0;
+              const played = playedLength(dur, i.clip_max !== undefined ? i.clip_max : (job.clip_max ?? null));
+              return (
+                <li key={i.id} className="truncate">
+                  <b className="text-text">{n + 1}.</b> {i.title || byId[i.id]?.title}
+                  {dur > 0 && <span className="tabular-nums"> · {fmtTime(played)}</span>}
+                </li>
+              );
+            })}
           </ol>
           {job.reveal?.length ? (
             <p className="text-xs text-muted">
@@ -399,6 +462,40 @@ export default function CountdownPanel({
         </div>
       </div>
     </section>
+  );
+}
+
+/** How much of a clip plays, from 10s up to the full clip. All the way right = the full clip (null). */
+function LengthSlider({
+  duration, value, label, onChange,
+}: { duration: number; value: number | null; label: string; onChange: (v: number | null) => void }) {
+  const max = Math.ceil(duration);
+  const played = playedLength(duration, value);
+  const full = played >= duration;
+  const readout = (
+    <span className={`shrink-0 text-[11px] tabular-nums ${full ? "text-muted" : "font-semibold text-accent"}`}>
+      {full ? `Full · ${fmtTime(duration)}` : `${fmtTime(played)} of ${fmtTime(duration)}`}
+    </span>
+  );
+  if (max <= MIN_LEN) return <div className="flex justify-end">{readout}</div>; // too short to cut
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="range"
+        min={MIN_LEN}
+        max={max}
+        step={1}
+        value={full ? max : Math.max(MIN_LEN, played)}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          onChange(v >= duration ? null : v);
+        }}
+        aria-label={label}
+        aria-valuetext={full ? "Full clip" : `${played} seconds`}
+        className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[var(--color-accent)]"
+      />
+      {readout}
+    </div>
   );
 }
 

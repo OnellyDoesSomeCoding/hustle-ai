@@ -34,7 +34,7 @@ export const api = {
   insights: () => request<Insights>("/api/insights"),
   makeCountdown: (
     id: string,
-    body: { items: CountdownJob["items"]; title: string; reveal: number[]; clip_max: number | null },
+    body: { items: CountdownJob["items"]; title: string; reveal: number[] },
   ) =>
     request<Project>(`/api/projects/${id}/countdown`, {
       method: "POST",

@@ -102,12 +102,13 @@ export interface CountdownJob {
   progress: number;
   message: string;
   error: string | null;
-  /** Best first: items[0] is #1. `title` is the list label; empty = the clip's title. */
-  items: { id: string; title: string }[];
+  /** Best first: items[0] is #1. `title` is the list label; empty = the clip's title.
+   * `clip_max` = seconds of that clip to play (from its start); null = the full clip. */
+  items: { id: string; title: string; clip_max?: number | null }[];
   title: string;
   /** Ranks in playback order, e.g. [3, 1, 5, 2, 4]. */
   reveal?: number[];
-  /** Seconds per clip; null = full clips. */
+  /** Seconds per clip, from jobs saved before each item had its own `clip_max`. */
   clip_max?: number | null;
   video: string | null;
   duration: number | null;
